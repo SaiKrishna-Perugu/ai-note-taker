@@ -72,12 +72,12 @@ def run_session(root: Path, session: Path, config: dict) -> None:
     done = threading.Event()
     stop = threading.Event()
     processor_thread = None
-    processing_errors: list[str] = []
 
     def request_stop(signum, frame):
         stop.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    for sig in previous_handlers:
         signal.signal(sig, request_stop)
 
     try:
@@ -96,7 +96,6 @@ def run_session(root: Path, session: Path, config: dict) -> None:
                             processor.pass_once(force=True)
                             processor.finish()
                         except Exception as exc:
-                            processing_errors.append(type(exc).__name__)
                             write_json(session / "processing.json",
                                        {"status": "failed", "error_type": type(exc).__name__})
 
@@ -128,7 +127,12 @@ def run_session(root: Path, session: Path, config: dict) -> None:
                 logging.error("Session failed (%s)", type(exc).__name__)
             finally:
                 if capture:
-                    capture.close()
+                    try:
+                        capture.close()
+                        if capture.errors:
+                            state.update(status="failed", error=capture.errors[0])
+                    except Exception as exc:
+                        state.update(status="failed", error_type=type(exc).__name__)
                 state["recording_stopped_at"] = now()
                 if state["status"] != "failed":
                     state["status"] = "processing"
@@ -147,6 +151,8 @@ def run_session(root: Path, session: Path, config: dict) -> None:
         state.update(status="failed", error=str(exc), finished_at=now())
         write_json(session / "session.json", state)
     finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
         if ai:
             ai.close()
 

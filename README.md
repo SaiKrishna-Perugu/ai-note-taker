@@ -1,5 +1,10 @@
 # AI Note Taker
 
+The native Windows desktop version is maintained separately in
+[`windows-app/`](windows-app/README.md). It includes a circular floating recorder,
+pause/resume controls, and a main window that stays in the Windows taskbar when
+minimized. Follow its setup instructions to generate your local launcher.
+
 A Windows background recorder for calls and meetings. Captures the audio playing
 through your selected speakers/headphones using WASAPI loopback, transcribes
 completed audio chunks with Gemini, and saves the original transcript alongside
@@ -15,9 +20,16 @@ Copy-Item .env.example .env  # Only if you do not already have .env
 ```
 
 Set `GEMINI_API_KEY` in `.env` or in your environment. Environment variables take
-precedence. `GEMINI_MODEL` selects the model; `--model` overrides it. Recordings
+precedence. `GEMINI_MODEL` selects the model (`MODEL_ID` is also accepted);
+`--model` overrides it. Recordings
 and `.env` are ignored by Git. Existing prototype scripts are separate from the
 application; `gemini.py` still needs its own LangChain dependencies.
+
+`ALM_LLM_PROVIDER` defaults to `aistudio`. Existing Vertex configurations are also
+supported: `vertex_express` uses an Express API key; `vertex_adc` uses Application
+Default Credentials with `PROJECT_ID` and optional `LOCATION` (default `global`).
+ADC mode does not use `GEMINI_API_KEY`. Configure ADC with your Google Cloud tools
+before starting the recorder. See the [Google SDK authentication guide](https://googleapis.github.io/python-genai/).
 
 ## Record a meeting
 
@@ -115,3 +127,7 @@ Tests use standard-library `unittest` with mocked Gemini requests and synthetic
 PCM audio; routine tests need neither credentials nor audio hardware. Hardware
 validation requires a Windows loopback recording while speech is playing on the
 selected output, then verifying `transcript.txt` and `notes.json`.
+
+`powershell -ExecutionPolicy Bypass -File tests/smoke_windows.ps1` performs this
+check using locally synthesized speech. Add `-WithAI` to also test the configured
+Gemini key and verify the resulting transcript and notes (uses the API).

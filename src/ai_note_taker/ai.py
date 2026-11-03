@@ -11,15 +11,45 @@ from ai_note_taker.models import MeetingNotes, Transcript
 DEFAULT_MODEL = "gemini-2.5-flash"
 
 
+def provider() -> str:
+    name = os.getenv("ALM_LLM_PROVIDER", os.getenv("AUTH_MODE", "aistudio")).lower()
+    if name in ("aistudio", "ai_studio", "gemini"):
+        return "aistudio"
+    if name in ("vertex_express", "vertex-express", "enterprise"):
+        return "vertex_express"
+    if name in ("vertex_adc", "vertex", "vertex_iam"):
+        return "vertex_adc"
+    raise ValueError("ALM_LLM_PROVIDER must be aistudio, vertex_express, or vertex_adc")
+
+
+def validate_configuration() -> None:
+    if provider() != "vertex_adc" and not os.getenv("GEMINI_API_KEY"):
+        raise ValueError("Set GEMINI_API_KEY in your environment or .env file, "
+                         "or use --record-only to transcribe later.")
+    if provider() == "vertex_adc" and not (os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")):
+        raise ValueError("Set PROJECT_ID or GOOGLE_CLOUD_PROJECT for Vertex AI ADC.")
+
+
 class Gemini:
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
+        validate_configuration()
         key = os.getenv("GEMINI_API_KEY")
-        if not key:
-            raise ValueError("Set GEMINI_API_KEY in your environment or .env file, "
-                             "or use --record-only to transcribe later.")
         self.model = model
-        self.client = genai.Client(api_key=key, http_options=types.HttpOptions(
-            timeout=60_000, retry_options=types.HttpRetryOptions(attempts=3)))
+        options = types.HttpOptions(timeout=60_000, retry_options=types.HttpRetryOptions(attempts=3))
+        mode = provider()
+        if mode == "vertex_adc":
+            import google.auth
+
+            credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            self.client = genai.Client(
+                vertexai=True, credentials=credentials,
+                project=os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT"),
+                location=os.getenv("LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "global")),
+                http_options=options)
+        elif mode == "vertex_express":
+            self.client = genai.Client(vertexai=True, api_key=key, http_options=options)
+        else:
+            self.client = genai.Client(vertexai=False, api_key=key, http_options=options)
 
     def close(self) -> None:
         self.client.close()

@@ -141,7 +141,64 @@ class PipelineTests(unittest.TestCase):
             Transcript.model_validate({"segments": [
                 {"start": 2, "end": 1, "speaker": "Speaker 1", "text": "Hi"}]})
 
-    @patch.dict("os.environ", {"GEMINI_API_KEY": "fake-test-key"})
+    def test_corrupt_tail_does_not_block_good_audio(self):
+        self.chunk(source="system")
+        self.chunk(source="microphone")
+        path = self.session / "chunks/microphone-000000.json"
+        from ai_note_taker.storage import write_json
+
+        chunk = read_json(path)
+        chunk["ready"] = False
+        write_json(path, chunk)
+        (self.session / chunk["audio"]).write_bytes(b"broken")
+        recover_chunks(self.session)
+        ai = self.ai()
+        processor = Processor(self.session, ai)
+        processor.pass_once()
+        self.assertEqual(ai.transcribe.call_count, 1)
+        self.assertFalse(processor.finish())
+        self.assertEqual(read_json(self.session / "errors/microphone-000000.json")["stage"],
+                         "audio_recovery")
+
+    @patch.dict("os.environ", {"ALM_LLM_PROVIDER": "vertex_adc", "PROJECT_ID": "test-project",
+                               "GEMINI_API_KEY": "unused-key", "LOCATION": "global"})
+    @patch("ai_note_taker.ai.genai.Client")
+    @patch("google.auth.default")
+    def test_adc_uses_credentials_instead_of_env_api_key(self, auth, client):
+        credentials = Mock()
+        auth.return_value = (credentials, "test-project")
+        Gemini("test-model")
+        options = client.call_args.kwargs
+        self.assertTrue(options["vertexai"])
+        self.assertIs(options["credentials"], credentials)
+        self.assertNotIn("api_key", options)
+        self.assertEqual(options["location"], "global")
+
+    @patch.dict("os.environ", {"ALM_LLM_PROVIDER": "vertex_express", "GEMINI_API_KEY": "test-key"})
+    @patch("ai_note_taker.ai.genai.Client")
+    def test_express_uses_global_key_without_project(self, client):
+        Gemini("test-model")
+        options = client.call_args.kwargs
+        self.assertTrue(options["vertexai"])
+        self.assertEqual(options["api_key"], "test-key")
+        self.assertNotIn("project", options)
+
+    @patch("ai_note_taker.runtime.Capture")
+    def test_record_only_lifecycle_flushes_and_stops(self, capture):
+        from ai_note_taker.runtime import run_session
+
+        capture.return_value.errors = []
+        capture.return_value.sources = [{"source": "system"}]
+        (self.session / "stop.request").touch()
+        config = {"record_only": True, "chunk_seconds": 30, "microphone": False,
+                  "system_device": None, "mic_device": None, "duration": None}
+        run_session(self.root, self.session, config)
+        capture.return_value.start.assert_called_once()
+        capture.return_value.close.assert_called_once()
+        self.assertEqual(read_json(self.session / "session.json")["status"], "stopped")
+        self.assertTrue((self.session / "transcript.json").exists())
+
+    @patch.dict("os.environ", {"GEMINI_API_KEY": "fake-test-key", "ALM_LLM_PROVIDER": "aistudio"})
     @patch("ai_note_taker.ai.genai.Client")
     def test_gemini_audio_request_uses_schema_and_validates_timestamps(self, client):
         self.chunk()

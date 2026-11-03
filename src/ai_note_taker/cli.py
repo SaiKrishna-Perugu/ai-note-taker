@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from ai_note_taker.ai import DEFAULT_MODEL, Gemini
+from ai_note_taker.ai import DEFAULT_MODEL, Gemini, validate_configuration
 from ai_note_taker.audio import devices
 from ai_note_taker.processing import Processor, recover_chunks
 from ai_note_taker.runtime import create_session, current, is_alive, recorder_lock, run_session
@@ -46,7 +46,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--duration", type=positive, default=None,
                              help="Automatically stop after this many seconds")
         command.add_argument("--record-only", action="store_true", help="Keep audio for later transcription")
-        command.add_argument("--model", default=os.getenv("GEMINI_MODEL", DEFAULT_MODEL))
+        command.add_argument("--model", default=None)
         command.add_argument("--language", default="auto", help="Spoken language hint; default auto")
     commands.add_parser("status", help="Show recorder state and pending chunk count")
     stop = commands.add_parser("stop", help="Stop capture and let pending transcription finish")
@@ -88,8 +88,8 @@ def execute(args: argparse.Namespace) -> int:
             raise ValueError("Use --chunk-seconds of 60 or less to keep AI requests small.")
         if args.mic_device is not None and not args.microphone:
             raise ValueError("--mic-device requires --microphone")
-        if not args.record_only and not os.getenv("GEMINI_API_KEY"):
-            raise ValueError("Set GEMINI_API_KEY in .env or the environment, or use --record-only.")
+        if not args.record_only:
+            validate_configuration()
         active = current(root)
         if active and is_alive(active[1]):
             raise RuntimeError("A recorder is already running. Use status or stop.")
@@ -175,9 +175,8 @@ def main() -> None:
         argument_parser.print_help()
         return
     load_dotenv(args.env_file, override=False)
-    # GEMINI_MODEL in dotenv is loaded after argparse, so apply it only when no CLI override exists.
-    if args.command in ("start", "record") and "--model" not in sys.argv:
-        args.model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
+    if args.command in ("start", "record"):
+        args.model = args.model or os.getenv("GEMINI_MODEL") or os.getenv("MODEL_ID", DEFAULT_MODEL)
     try:
         raise SystemExit(execute(args))
     except (ValueError, RuntimeError, OSError, KeyError) as exc:

@@ -41,9 +41,10 @@ class Processor:
                 # SDK exception text can contain request URLs or credentials. Store only type.
                 write_json(self.session / "errors" / path.name,
                            {"chunk_id": chunk["id"], "error_type": type(exc).__name__,
+                            "http_status": getattr(exc, "code", None),
                             "at": now(), "retryable": True})
-                log.warning("Transcription failed for %s (%s); audio retained.",
-                            chunk["id"], type(exc).__name__)
+                log.warning("Transcription failed for %s (%s, HTTP %s); audio retained.",
+                            chunk["id"], type(exc).__name__, getattr(exc, "code", "n/a"))
         if changed:
             export_transcript(self.session)
         return failed
@@ -66,7 +67,8 @@ class Processor:
             return True
         except Exception as exc:
             write_json(self.session / "processing.json",
-                       {"status": "notes_failed", "error_type": type(exc).__name__, "pending": 0})
+                       {"status": "notes_failed", "error_type": type(exc).__name__,
+                        "http_status": getattr(exc, "code", None), "pending": 0})
             log.warning("Meeting notes failed (%s); transcript retained.", type(exc).__name__)
             return False
 
@@ -77,7 +79,13 @@ def recover_chunks(session: Path) -> None:
         chunk = read_json(path)
         if chunk["ready"]:
             continue
-        with wave.open(str(session / chunk["audio"]), "rb") as audio:
-            chunk.update(duration=audio.getnframes() / audio.getframerate(), ready=True,
-                         recovered=True)
-        write_json(path, chunk)
+        try:
+            with wave.open(str(session / chunk["audio"]), "rb") as audio:
+                chunk.update(duration=audio.getnframes() / audio.getframerate(), ready=True,
+                             recovered=True)
+            write_json(path, chunk)
+        except (OSError, EOFError, wave.Error) as exc:
+            write_json(session / "errors" / path.name,
+                       {"chunk_id": chunk["id"], "error_type": type(exc).__name__,
+                        "stage": "audio_recovery", "retryable": False})
+            log.warning("Cannot recover %s; other chunks will still be processed.", chunk["id"])
