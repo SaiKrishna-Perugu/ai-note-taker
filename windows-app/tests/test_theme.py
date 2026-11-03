@@ -31,6 +31,7 @@ READABILITY = [
     ("warn chip", "chip_warn_fg", "chip_warn_bg", 4.5), ("off chip", "chip_off_fg", "chip_off_bg", 4.5),
     ("notice", "notice_text", "notice_bg", 4.5), ("button", "text", "btn_bg", 7),
     ("primary button", "primary_fg", "primary", 4.5), ("primary hover", "primary_fg", "primary_hover", 4.5),
+    ("danger button", "danger", "btn_bg", 4.5), ("danger button hover", "danger", "danger_bg", 4.5),
     ("input", "text", "input_bg", 7), ("inactive tab", "tab_fg", "card", 4.5),
     ("selected tab", "tab_sel_fg", "card", 4.5), ("selected list row", "text", "list_sel", 7),
     ("selected menu row", "text", "menu_sel", 7), ("tooltip", "tip_fg", "tip_bg", 7),

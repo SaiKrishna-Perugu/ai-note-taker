@@ -6,14 +6,15 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from dotenv import dotenv_values
 from PySide6.QtCore import QEvent, QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QIcon,
-                           QPainter, QPixmap)
+                           QKeySequence, QPainter, QPixmap, QShortcut)
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QSystemTrayIcon, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
@@ -87,6 +88,17 @@ def label(text: str, name: str = "", wrap: bool = False) -> QLabel:
     widget.setObjectName(name)
     widget.setWordWrap(wrap)
     return widget
+
+
+def fit_combo(combo: QComboBox) -> QComboBox:
+    """Let a dropdown shrink to its container instead of demanding its longest item's width.
+
+    Without this its minimum width changes with the stylesheet, which pushed the scrolling
+    settings panel wider than its viewport after a theme switch.
+    """
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    combo.setMinimumContentsLength(8)
+    return combo
 
 
 def button(text: str, callback, primary: bool = False) -> QPushButton:
@@ -200,7 +212,21 @@ class MainWindow(QMainWindow):
         self.history = QListWidget()
         self.history.setAccessibleName("Saved recording sessions")
         self.history.itemClicked.connect(self.select_session)
+        # Ctrl/Shift-click to pick several recordings; right-click or the Delete key removes them.
+        self.history.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.history.customContextMenuRequested.connect(self.show_history_menu)
+        self.history.itemSelectionChanged.connect(self.update_delete_button)
+        delete_key = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.history)
+        delete_key.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_key.activated.connect(self.delete_selected)
         left.addWidget(self.history, 1)
+        self.delete_button = button("Delete recording…", self.delete_selected)
+        self.delete_button.setObjectName("danger")
+        self.delete_button.setAccessibleName("Delete selected recordings")
+        self.delete_button.setToolTip("Move the selected recording(s) to the Recycle Bin. "
+                                      "Ctrl/Shift-click to select several.")
+        left.addWidget(self.delete_button)
         left.addWidget(button("Open recordings", self.open_recordings))
         left.addWidget(label("Audio and transcripts\nstay in your recordings folder.", "muted", True))
         outer.addWidget(sidebar)
@@ -213,6 +239,9 @@ class MainWindow(QMainWindow):
         heading.addWidget(label("MEETING WORKSPACE", "eyebrow"))
         heading.addWidget(label("Catch every detail.", "heading"))
         header.addLayout(heading, 1)
+        self.theme_toggle = button("Dark mode", self.toggle_theme)
+        self.theme_toggle.setAccessibleName("Switch between light and dark mode")
+        header.addWidget(self.theme_toggle)
         header.addWidget(button("Floating recorder  ↗", lambda: self.show_popup(force=True)))
         body.addLayout(header)
         self.message = label("Record your meeting. Get a transcript and useful notes.", "muted", True)
@@ -230,6 +259,7 @@ class MainWindow(QMainWindow):
         self.notice.hide()
         body.addWidget(self.notice)
         self.transcribe_started = False
+        self.flash_text, self.flash_until = "", 0.0
 
         columns = QHBoxLayout()
         columns.setSpacing(20)
@@ -300,7 +330,7 @@ class MainWindow(QMainWindow):
         settings.setContentsMargins(17, 20, 17, 18)
         settings.setSpacing(10)
         settings.addWidget(label("APPEARANCE", "eyebrow"))
-        self.theme_box = QComboBox()
+        self.theme_box = fit_combo(QComboBox())
         self.theme_box.setAccessibleName("Theme")
         self.theme_box.setToolTip("Match Windows follows your Windows light/dark setting, even while the app is open.")
         for preference in PREFERENCES:
@@ -312,7 +342,7 @@ class MainWindow(QMainWindow):
         settings.addSpacing(8)
         settings.addWidget(label("CAPTURE SETTINGS", "eyebrow"))
         settings.addWidget(label("System audio"))
-        self.system = QComboBox()
+        self.system = fit_combo(QComboBox())
         self.system.setAccessibleName("System audio device")
         self.system.addItem("Default speakers / headphones", None)
         settings.addWidget(self.system)
@@ -320,7 +350,7 @@ class MainWindow(QMainWindow):
         self.microphone = QCheckBox("Include my microphone")
         self.microphone.setChecked(self.preferences.value("microphone", False, type=bool))
         settings.addWidget(self.microphone)
-        self.mic = QComboBox()
+        self.mic = fit_combo(QComboBox())
         self.mic.setAccessibleName("Microphone device")
         self.mic.addItem("Default microphone", None)
         self.mic.setEnabled(self.microphone.isChecked())
@@ -359,6 +389,7 @@ class MainWindow(QMainWindow):
         self.tray_menu = menu = QMenu()
         for title, action in (("Open Note Taker", self.restore), ("Show floating recorder", lambda: self.show_popup(force=True)),
                               ("Pause / Resume", self.toggle_pause), ("Stop recording", self.stop),
+                              ("Switch light / dark mode", self.toggle_theme),
                               ("Quit", self.request_quit)):
             item = QAction(title, self)
             item.triggered.connect(action)
@@ -404,7 +435,14 @@ class MainWindow(QMainWindow):
         self.theme_preference = normalize(preference)
         self.preferences.setValue("theme", self.theme_preference)
         apply_color_scheme(self.theme_preference)
+        self.theme_box.blockSignals(True)                    # keep the dropdown in step without re-entering
+        self.theme_box.setCurrentIndex(self.theme_box.findData(self.theme_preference))
+        self.theme_box.blockSignals(False)
         self.apply_theme()
+
+    def toggle_theme(self) -> None:
+        """One-click switch between light and dark (an explicit choice; Match Windows lives in the dropdown)."""
+        self.set_theme_preference("light" if self.theme_name == "dark" else "dark")
 
     def on_color_scheme_changed(self, *_args) -> None:
         if not self.quitting:
@@ -419,6 +457,9 @@ class MainWindow(QMainWindow):
         self.tray_menu.setStyleSheet(sheet)
         self.waveform.set_theme(self.theme_name)
         self.popup.set_theme(self.theme_name)
+        dark = self.theme_name == "dark"
+        self.theme_toggle.setText("Light mode" if dark else "Dark mode")       # names what a click switches to
+        self.theme_toggle.setToolTip("Switch to light mode" if dark else "Switch to dark mode")
 
     def ai_values(self) -> dict:
         # Blank lines (e.g. the template's empty GEMINI_API_KEY=) must not hide a real value.
@@ -691,6 +732,98 @@ class MainWindow(QMainWindow):
         self.notes.clear()
         self.message.setText("Ready for your next meeting. Press Record to begin.")
 
+    # --- deleting recordings -----------------------------------------------------------------
+
+    def flash(self, text: str, seconds: float = 8.0) -> None:
+        """Show a message that outlasts the periodic status refresh for a few seconds."""
+        self.flash_text, self.flash_until = text, time.monotonic() + seconds
+        self.message.setText(text)
+
+    def update_delete_button(self) -> None:
+        self.delete_button.setEnabled(self.status not in ACTIVE and not self.controller.transcribing()
+                                      and bool(self.delete_targets()))
+
+    def delete_targets(self) -> list[Path]:
+        """The recordings a delete would remove: the highlighted ones, else the one on screen."""
+        chosen = [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.history.selectedItems()]
+        if chosen:
+            return chosen
+        shown = None if self.view_new else self.effective_session()
+        return [shown] if shown is not None else []
+
+    def history_menu(self, point) -> QMenu | None:
+        """The right-click menu for the recording under `point` (which becomes the selection)."""
+        item = self.history.itemAt(point)
+        if item is None:
+            return None
+        if not item.isSelected():
+            self.history.clearSelection()
+            item.setSelected(True)
+        menu = QMenu(self)
+        menu.setStyleSheet(self.styleSheet())
+        delete = menu.addAction("Delete recording…")
+        delete.setEnabled(self.delete_button.isEnabled())
+        delete.triggered.connect(self.delete_selected)
+        return menu
+
+    def show_history_menu(self, point) -> None:
+        menu = self.history_menu(point)
+        if menu is not None:
+            menu.exec(self.history.viewport().mapToGlobal(point))
+
+    def confirm_delete(self, sessions: list[Path]) -> bool:
+        """Spell out exactly what will be removed; Cancel is the default."""
+        if len(sessions) == 1:
+            facts = self.controller.describe(sessions[0])
+            name = sessions[0].name
+            when = f"{name[:4]}-{name[4:6]}-{name[6:8]} {name[9:11]}:{name[11:13]}"
+            minutes, seconds = divmod(int(facts.get("seconds", 0)), 60)
+            kept = ["audio"] + (["transcript"] if facts.get("has_transcript") else []) + \
+                   (["meeting notes"] if facts.get("has_notes") else [])
+            title, headline = "Delete this recording?", f"Meeting {when}  ·  {minutes}:{seconds:02}"
+            listing = kept[0] if len(kept) == 1 else f"{', '.join(kept[:-1])} and {kept[-1]}"
+            detail = f"The {listing} will be moved to the Recycle Bin."
+        else:
+            title, headline = f"Delete {len(sessions)} recordings?", f"{len(sessions)} selected recordings"
+            detail = "Their audio, transcripts and meeting notes will be moved to the Recycle Bin."
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("AI Note Taker")
+        box.setText(f"<b>{title}</b><br>{headline}")
+        box.setInformativeText(detail + " You can restore them from there if you change your mind.")
+        remove = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is remove
+
+    def delete_selected(self) -> None:
+        if self.status in ACTIVE or self.controller.transcribing():
+            self.message.setText("Finish the current recording or transcription before deleting.")
+            return
+        targets = self.delete_targets()
+        if not targets or not self.confirm_delete(targets):
+            return
+        deleted, failed = 0, []
+        for session in targets:
+            try:
+                self.controller.delete_session(session)
+                deleted += 1
+            except Exception as exc:
+                failed.append(str(exc))
+        self.selected = None
+        self.view_new = True                       # show a blank workspace, not some other meeting
+        self.history.clearSelection()
+        self.transcript.clear()
+        self.notes.clear()
+        self.last_session_ids = []                 # rebuild the sidebar list
+        noun = "recording" if deleted == 1 else "recordings"
+        text = f"Moved {deleted} {noun} to the Recycle Bin." if deleted else ""
+        if failed:
+            text = (text + " " if text else "") + f"{len(failed)} could not be deleted: {failed[0]}"
+        self.refresh()
+        self.flash(text)
+
     def select_session(self, item: QListWidgetItem) -> None:
         self.selected = Path(item.data(Qt.ItemDataRole.UserRole))
         self.view_new = False
@@ -756,7 +889,9 @@ class MainWindow(QMainWindow):
                 message = "Recording audio locally. AI is disabled." if self.status == "recording" else message
             self.message.setText(message)
         if announcement:
-            self.message.setText(announcement)
+            self.flash(announcement)
+        elif self.flash_text and time.monotonic() < self.flash_until:
+            self.message.setText(self.flash_text)
         self.waveform.level = max(state.get("levels", {}).values(), default=0) if self.status == "recording" else 0
         self.waveform.phase += 1
         self.waveform.update()
@@ -774,6 +909,7 @@ class MainWindow(QMainWindow):
                 item.setToolTip(path.parent.name)
                 self.history.addItem(item)
             self.last_session_ids = ids
+        self.update_delete_button()
         self.update_documents()
 
 

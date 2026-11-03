@@ -23,6 +23,7 @@ LIGHT = {
     "selection": "#edcbb7", "tab_fg": "#6b675f", "tab_sel_fg": "#a94e32", "list_sel": "#dfddd5",
     "list_hover": "#e6e3db", "menu_bg": "#faf9f6", "menu_border": "#dad6cd", "menu_sel": "#ece6dc",
     "tip_bg": "#292724", "tip_fg": "#ffffff",
+    "danger": "#b3261e", "danger_bg": "#fdeceb",
     "wave_idle": "#e4dfd5", "wave_active": "#be5b3d",
 }
 
@@ -40,6 +41,7 @@ DARK = {
     "selection": "#5a3b2c", "tab_fg": "#9b958a", "tab_sel_fg": "#ee9a78", "list_sel": "#34312c",
     "list_hover": "#2b2926", "menu_bg": "#22201e", "menu_border": "#3d3935", "menu_sel": "#34312c",
     "tip_bg": "#ece8e1", "tip_fg": "#1b1a18",
+    "danger": "#f4a8a1", "danger_bg": "#3d2523",
     "wave_idle": "#34312c", "wave_active": "#d2704f",
 }
 
@@ -82,6 +84,9 @@ QPushButton:disabled { color: $btn_dis_fg; background: $btn_dis_bg; border-color
 QPushButton#primary { background: $primary; border-color: $primary; color: $primary_fg; }
 QPushButton#primary:hover { background: $primary_hover; }
 QPushButton#primary:disabled { background: $primary_dis; border-color: $primary_dis; color: $primary_dis_fg; }
+QPushButton#danger { color: $danger; }
+QPushButton#danger:hover { background: $danger_bg; border-color: $danger; }
+QPushButton#danger:disabled { color: $btn_dis_fg; background: $btn_dis_bg; border-color: $btn_dis_border; }
 QLineEdit, QComboBox { background: $input_bg; border: 1px solid $input_border; border-radius: 7px; padding: 8px; }
 QLineEdit:focus, QComboBox:focus { border: 1px solid $input_focus; }
 QComboBox::drop-down { border: none; width: 22px; }

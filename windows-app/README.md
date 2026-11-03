@@ -22,6 +22,14 @@ is ticked) or **AI KEY NEEDED**.
 follows your Windows light/dark setting live, even while the app is open), **Light** or **Dark**. The
 choice is remembered, and it also styles the title bar, dialogs, tray menu and the floating recorder.
 All colours live in `src/ai_note_taker/theme.py`; a test guards the text contrast of both themes.
+For a one-click switch use the **Dark mode / Light mode** button at the top right (or **Switch light /
+dark mode** in the tray menu); it makes an explicit choice and the dropdown stays in step.
+
+**Deleting recordings.** Select one or more recordings in the sidebar (Ctrl/Shift-click for several) and
+press **Delete recording…**, the Delete key, or right-click > Delete. A confirmation lists what will be
+removed (date, length, audio/transcript/notes) with Cancel as the default, then the recording is moved
+to the **Windows Recycle Bin**, so a mistake can be undone from there. A recording that is still being
+recorded or transcribed cannot be deleted, and only folders inside your recordings folder are ever touched.
 
 **No transcript for a recording?** An amber bar above the recorder says why and offers one
 button: **Transcribe now** (for audio saved without AI), **Retry transcription** (when the AI

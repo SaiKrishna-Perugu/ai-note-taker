@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,6 +98,122 @@ class ControllerTests(unittest.TestCase):
         environment = DesktopController._environment(env_file)
         self.assertEqual(environment["GEMINI_API_KEY"], "only-for-worker")
         self.assertNotIn("GEMINI_API_KEY", os.environ)
+
+
+class DeleteTests(unittest.TestCase):
+    """Deleting destroys user data, so the safety rules are tested explicitly."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.controller = DesktopController(self.root)
+        # Never touch the real Recycle Bin from tests: stand in with a plain delete.
+        patcher = patch("ai_note_taker.desktop_controller.send_to_recycle_bin", side_effect=shutil.rmtree)
+        self.recycle = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def saved(self, name: str, **state) -> Path:
+        session = make_session(self.root, name, chunks=2, responses=2)
+        (session / "session.json").write_text(json.dumps({"status": "stopped", "active_seconds": 65, **state}),
+                                              encoding="utf-8")
+        (session / "transcript.txt").write_text("hello", encoding="utf-8")
+        (session / "notes.md").write_text("# notes", encoding="utf-8")
+        return session
+
+    def test_delete_removes_the_whole_recording_through_the_recycle_bin(self):
+        session = self.saved("20261103-100000-aaaa0001")
+        self.controller.delete_session(session)
+        self.assertFalse(session.exists())
+        self.recycle.assert_called_once_with(session.resolve())
+
+    def test_delete_repoints_the_current_session_to_the_newest_remaining(self):
+        old = self.saved("20261103-100000-aaaa0001")
+        new = self.saved("20261103-110000-aaaa0002")
+        (self.root / "current.json").write_text(json.dumps({"session_id": new.name}), encoding="utf-8")
+        self.controller.session = new
+        self.controller.delete_session(new)
+        self.assertIsNone(self.controller.session)
+        self.assertEqual(json.loads((self.root / "current.json").read_text())["session_id"], old.name)
+
+    def test_deleting_the_last_recording_clears_the_current_pointer(self):
+        only = self.saved("20261103-100000-aaaa0001")
+        (self.root / "current.json").write_text(json.dumps({"session_id": only.name}), encoding="utf-8")
+        self.controller.delete_session(only)
+        self.assertFalse((self.root / "current.json").exists())
+        self.assertEqual(self.controller.sessions(), [])
+        self.assertIsNone(self.controller.effective_session())
+
+    def test_a_dangling_pointer_does_not_crash_the_app(self):
+        from ai_note_taker.runtime import current
+
+        (self.root / "current.json").write_text(json.dumps({"session_id": "gone"}), encoding="utf-8")
+        self.assertIsNone(current(self.root))
+        (self.root / "current.json").write_text("{broken", encoding="utf-8")
+        self.assertIsNone(current(self.root))
+        self.assertEqual(self.controller.snapshot()["status"], "idle")
+
+    def test_it_refuses_folders_outside_the_recordings_folder(self):
+        outside = Path(self.temp.name).parent / "not-recordings"
+        outside.mkdir(exist_ok=True)
+        self.addCleanup(outside.rmdir)
+        (outside / "session.json").write_text("{}", encoding="utf-8")
+        self.addCleanup((outside / "session.json").unlink)
+        for target in (outside, self.root, self.root / "nested" / "deeper"):
+            self.assertFalse(self.controller.can_delete(target), str(target))
+            with self.assertRaises(RuntimeError):
+                self.controller.delete_session(target)
+        self.recycle.assert_not_called()
+
+    def test_it_refuses_folders_that_are_not_recording_sessions(self):
+        stranger = self.root / "my-holiday-photos"
+        stranger.mkdir()
+        (stranger / "photo.jpg").write_text("x", encoding="utf-8")
+        self.assertFalse(self.controller.can_delete(stranger))
+        with self.assertRaises(RuntimeError):
+            self.controller.delete_session(stranger)
+        self.assertTrue((stranger / "photo.jpg").exists())
+
+    def test_it_never_deletes_a_recording_that_is_still_running(self):
+        live = self.saved("20261103-100000-aaaa0001", status="recording")
+        with patch("ai_note_taker.desktop_controller.is_alive", return_value=True):
+            self.assertFalse(self.controller.can_delete(live))
+            with self.assertRaises(RuntimeError):
+                self.controller.delete_session(live)
+        self.assertTrue(live.exists())
+        # A crashed recorder (process gone) is just leftover audio and can be deleted.
+        with patch("ai_note_taker.desktop_controller.is_alive", return_value=False):
+            self.assertTrue(self.controller.can_delete(live))
+
+    def test_it_never_deletes_the_recording_being_transcribed(self):
+        busy = self.saved("20261103-100000-aaaa0001")
+        process = Mock()
+        process.poll.return_value = None
+        self.controller.transcriber, self.controller.transcribing_session = process, busy
+        self.assertFalse(self.controller.can_delete(busy))
+        other = self.saved("20261103-110000-aaaa0002")
+        self.assertTrue(self.controller.can_delete(other))
+
+    def test_describe_reports_length_and_what_is_saved(self):
+        session = self.saved("20261103-100000-aaaa0001")
+        facts = self.controller.describe(session)
+        self.assertEqual(facts["seconds"], 65)
+        self.assertTrue(facts["has_transcript"])
+        self.assertTrue(facts["has_notes"])
+        bare = make_session(self.root, "20261103-120000-aaaa0003", chunks=1)
+        (bare / "session.json").write_text("{}", encoding="utf-8")
+        facts = self.controller.describe(bare)
+        self.assertFalse(facts["has_transcript"])
+        self.assertFalse(facts["has_notes"])
+
+    def test_a_failed_recycle_leaves_the_recording_and_the_pointer_alone(self):
+        session = self.saved("20261103-100000-aaaa0001")
+        (self.root / "current.json").write_text(json.dumps({"session_id": session.name}), encoding="utf-8")
+        self.recycle.side_effect = OSError("Windows could not move the recording")
+        with self.assertRaises(OSError):
+            self.controller.delete_session(session)
+        self.assertTrue(session.exists())
+        self.assertTrue((self.root / "current.json").exists())
 
 
 if __name__ == "__main__":

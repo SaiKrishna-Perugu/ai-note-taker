@@ -14,6 +14,8 @@ from shiboken6 import isValid
 
 from ai_note_taker.audio import Capture
 from ai_note_taker.desktop import MainWindow
+
+MainWindowType = MainWindow      # for patch.object(...)
 from ai_note_taker.runtime import create_session, run_session
 from ai_note_taker.storage import read_json
 
@@ -348,6 +350,186 @@ class DesktopTests(unittest.TestCase):
         self.controller.snapshot.return_value = {"status": "stopped"}
         self.window.refresh()
         self.assertTrue(self.window.notice.isHidden())
+
+    # --- switching modes and deleting recordings ---------------------------------------------
+
+    def fill_history(self, count: int = 3) -> list[Path]:
+        names = [f"20261103-{9 + i:02}0000-aaaa000{i}" for i in range(count)]
+        paths = [Path(self.temp.name) / name for name in names]
+        self.controller.sessions.return_value = [path / "session.json" for path in paths]
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.controller.describe.return_value = {"seconds": 125, "has_transcript": True, "has_notes": True}
+        self.window.refresh()
+        return paths
+
+    def select_rows(self, *rows: int) -> None:
+        self.window.history.clearSelection()
+        for row in rows:
+            self.window.history.item(row).setSelected(True)
+
+    def test_one_click_theme_switch_flips_between_light_and_dark(self):
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.pick_theme("light")
+        self.assertEqual(self.window.theme_toggle.text(), "Dark mode")       # names what a click does
+        self.window.theme_toggle.click()
+        self.assertEqual(self.window.theme_name, "dark")
+        self.assertEqual(self.window.theme_toggle.text(), "Light mode")
+        self.assertEqual(self.window.theme_box.currentData(), "dark")         # dropdown stays in step
+        self.assertEqual(self.window.preferences.value("theme"), "dark")
+        self.assertEqual(self.window.popup.theme, "dark")
+        self.window.theme_toggle.click()
+        self.assertEqual(self.window.theme_name, "light")
+        self.assertEqual(self.window.theme_box.currentData(), "light")
+        self.assertEqual(self.window.theme_toggle.text(), "Dark mode")
+
+    def test_switching_themes_never_makes_the_settings_panel_wider_than_its_viewport(self):
+        # Regression: a restyle grew the device dropdown's minimum width, so the panel's content
+        # overflowed and was clipped under the scrollbar.
+        from PySide6.QtWidgets import QScrollArea
+
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.window.resize(1174, 768)
+        self.window.show()
+        self.window.system.addItem("23 · Headset Earphone (IER-EX15C) [Loopback] with a very long name", 23)
+        scroller = self.window.findChild(QScrollArea, "settingsScroll")
+        for _ in range(3):
+            QApplication.processEvents()
+            self.assertLessEqual(scroller.widget().width(), scroller.viewport().width())
+            self.window.toggle_theme()
+
+    def test_theme_switch_also_works_from_the_dropdown_and_tray(self):
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.pick_theme("dark")
+        self.assertEqual(self.window.theme_toggle.text(), "Light mode")
+        titles = [action.text() for action in self.window.tray_menu.actions()]
+        self.assertIn("Switch light / dark mode", titles)
+        next(a for a in self.window.tray_menu.actions() if a.text() == "Switch light / dark mode").trigger()
+        self.assertEqual(self.window.theme_name, "light")
+
+    def test_toggling_from_match_windows_makes_an_explicit_opposite_choice(self):
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        with patch("ai_note_taker.theme.system_is_dark", return_value=True):
+            self.pick_theme("system")
+            self.window.on_color_scheme_changed()
+            self.assertEqual(self.window.theme_name, "dark")
+            self.window.theme_toggle.click()
+        self.assertEqual(self.window.theme_preference, "light")
+
+    def test_delete_asks_first_and_cancel_is_the_default(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        paths = self.fill_history()
+        self.select_rows(1)
+        seen = {}
+
+        def capture(box):
+            seen["default"] = box.defaultButton().text().replace("&", "")
+            seen["text"] = box.text() + " " + box.informativeText()
+            return 0
+
+        with patch.object(QMessageBox, "exec", capture):
+            self.window.delete_button.click()
+        self.assertEqual(seen["default"], "Cancel")
+        self.assertIn("Recycle Bin", seen["text"])
+        self.assertIn("2:05", seen["text"])                         # length
+        self.assertIn("audio, transcript and meeting notes", seen["text"])
+        self.assertIn("10:00", seen["text"])                        # when
+        self.controller.delete_session.assert_not_called()          # closing/cancelling deletes nothing
+        self.assertEqual(paths[1].name[:8], "20261103")
+
+    def test_confirming_deletes_only_the_selected_recording(self):
+        paths = self.fill_history()
+        self.select_rows(1)
+        with patch.object(MainWindowType, "confirm_delete", return_value=True) as ask:
+            self.window.delete_button.click()
+        ask.assert_called_once_with([paths[1]])
+        self.controller.delete_session.assert_called_once_with(paths[1])
+        self.assertIn("Moved 1 recording to the Recycle Bin", self.window.message.text())
+
+    def test_several_recordings_can_be_deleted_at_once(self):
+        paths = self.fill_history()
+        self.select_rows(0, 2)
+        with patch.object(MainWindowType, "confirm_delete", return_value=True):
+            self.window.delete_selected()
+        self.assertEqual([c.args[0] for c in self.controller.delete_session.call_args_list], [paths[0], paths[2]])
+        self.assertIn("Moved 2 recordings", self.window.message.text())
+
+    def test_declining_the_confirmation_deletes_nothing(self):
+        self.fill_history()
+        self.select_rows(0)
+        with patch.object(MainWindowType, "confirm_delete", return_value=False):
+            self.window.delete_selected()
+        self.controller.delete_session.assert_not_called()
+
+    def test_a_failed_delete_is_reported_not_hidden(self):
+        paths = self.fill_history(2)
+        self.select_rows(0, 1)
+        self.controller.delete_session.side_effect = [None, OSError("in use")]
+        with patch.object(MainWindowType, "confirm_delete", return_value=True):
+            self.window.delete_selected()
+        self.assertIn("Moved 1 recording", self.window.message.text())
+        self.assertIn("1 could not be deleted: in use", self.window.message.text())
+        self.assertEqual(self.controller.delete_session.call_count, len(paths))
+
+    def test_delete_is_blocked_while_recording_or_transcribing(self):
+        self.fill_history()
+        self.select_rows(0)
+        self.controller.snapshot.return_value = {"status": "recording", "active_seconds": 3}
+        self.window.refresh()
+        self.assertFalse(self.window.delete_button.isEnabled())
+        with patch.object(MainWindowType, "confirm_delete", return_value=True) as ask:
+            self.window.delete_selected()
+        ask.assert_not_called()
+        self.controller.delete_session.assert_not_called()
+        self.assertIn("Finish the current recording", self.window.message.text())
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.controller.transcribing.return_value = True
+        self.window.refresh()
+        self.assertFalse(self.window.delete_button.isEnabled())
+
+    def test_with_nothing_selected_delete_targets_the_recording_on_screen(self):
+        paths = self.fill_history()
+        self.controller.effective_session.return_value = paths[2]
+        self.select_rows()
+        self.assertEqual(self.window.delete_targets(), [paths[2]])
+        self.window.view_new = True
+        self.assertEqual(self.window.delete_targets(), [])
+        self.window.refresh()
+        self.assertFalse(self.window.delete_button.isEnabled())
+
+    def test_after_deleting_the_screen_is_blank_and_the_list_rebuilds(self):
+        self.fill_history()
+        self.select_rows(0)
+        with patch.object(MainWindowType, "confirm_delete", return_value=True):
+            self.window.delete_selected()
+        self.assertTrue(self.window.view_new)
+        self.assertIsNone(self.window.selected)
+        self.assertEqual(self.window.transcript.toPlainText(), "")
+
+    def test_delete_button_looks_like_a_danger_action_in_both_themes(self):
+        from ai_note_taker import theme
+
+        self.assertEqual(self.window.delete_button.objectName(), "danger")
+        for name in ("light", "dark"):
+            self.assertIn(theme.palette(name)["danger"], theme.style_sheet(name))
+
+    def test_right_click_menu_offers_delete_and_the_delete_key_is_wired(self):
+        self.fill_history()
+        rect = self.window.history.visualItemRect(self.window.history.item(1))
+        menu = self.window.history_menu(rect.center())
+        self.assertEqual([action.text() for action in menu.actions()], ["Delete recording…"])
+        self.assertTrue(menu.actions()[0].isEnabled())
+        self.assertTrue(self.window.history.item(1).isSelected())          # right-clicked row becomes the target
+        self.assertIsNone(self.window.history_menu(self.window.history.viewport().rect().bottomRight()))  # empty area
+        self.assertEqual(self.window.history.selectionMode().name, "ExtendedSelection")
 
     # --- dark mode ---------------------------------------------------------------------------
 

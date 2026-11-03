@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,27 @@ from dotenv import dotenv_values
 
 from ai_note_taker.runtime import create_session, current, is_alive
 from ai_note_taker.storage import read_json, write_json
+
+
+def send_to_recycle_bin(path: Path) -> None:
+    """Move a folder to the Windows Recycle Bin so a mistaken delete can be undone."""
+    if os.name != "nt":
+        shutil.rmtree(path)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class FileOperation(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("function", wintypes.UINT), ("source", wintypes.LPCWSTR),
+                    ("target", wintypes.LPCWSTR), ("flags", ctypes.c_ushort), ("aborted", wintypes.BOOL),
+                    ("mappings", ctypes.c_void_p), ("title", wintypes.LPCWSTR)]
+
+    delete, silent, no_confirm, allow_undo, no_error_ui = 3, 0x4, 0x10, 0x40, 0x400
+    operation = FileOperation(None, delete, str(path) + "\0", None, silent | no_confirm | allow_undo | no_error_ui,
+                              False, None, None)
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result or operation.aborted or path.exists():
+        raise OSError(f"Windows could not move the recording to the Recycle Bin (code {result}).")
 
 
 def worker_command(*args: str) -> list[str]:
@@ -44,6 +66,7 @@ class DesktopController:
         self.session: Path | None = None
         self.process: subprocess.Popen | None = None
         self.transcriber: subprocess.Popen | None = None
+        self.transcribing_session: Path | None = None
 
     @staticmethod
     def _environment(env_file: Path | None) -> dict:
@@ -99,6 +122,7 @@ class DesktopController:
         with (session / "recorder.log").open("ab") as log:
             self.transcriber = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                                 creationflags=flags, env=self._environment(env_file))
+        self.transcribing_session = session
 
     def transcribing(self) -> bool:
         return self.transcriber is not None and self.transcriber.poll() is None
@@ -157,6 +181,45 @@ class DesktopController:
     def stop(self) -> None:
         if self.session and self.snapshot().get("alive"):
             (self.session / "stop.request").touch()
+
+    def describe(self, session: Path) -> dict:
+        """Facts shown in the delete confirmation: when, how long, and what is saved."""
+        try:
+            seconds = float(read_json(session / "session.json").get("active_seconds", 0))
+        except (OSError, ValueError, TypeError):
+            seconds = 0.0
+        return {"name": session.name, "seconds": seconds,
+                "has_transcript": (session / "transcript.txt").is_file() and (session / "transcript.txt").stat().st_size > 0,
+                "has_notes": (session / "notes.md").is_file()}
+
+    def can_delete(self, session: Path) -> bool:
+        """Only real sessions inside the recordings folder, and never one that is still in use."""
+        try:
+            inside = session.resolve().parent == self.output
+        except OSError:
+            return False
+        if not inside or not (session / "session.json").is_file():
+            return False
+        try:
+            state = read_json(session / "session.json")
+        except (OSError, ValueError):
+            return True                                  # unreadable state: nothing live to protect
+        busy = is_alive(state) and state.get("status") in ("starting", "recording", "paused", "processing")
+        return not busy and not (self.transcribing() and self.transcribing_session == session)
+
+    def delete_session(self, session: Path) -> None:
+        """Move one recording (audio, transcript, notes) to the Recycle Bin."""
+        if not self.can_delete(session):
+            raise RuntimeError("This recording is in use or is not one of your saved recordings.")
+        send_to_recycle_bin(session.resolve())
+        if self.session is not None and self.session.resolve() == session.resolve():
+            self.session = None
+        remaining = self.sessions()
+        pointer = self.output / "current.json"
+        if remaining:
+            write_json(pointer, {"session_id": remaining[0].parent.name})   # newest first
+        else:
+            pointer.unlink(missing_ok=True)
 
     def sessions(self) -> list[Path]:
         return sorted(self.output.glob("*/session.json"), reverse=True)

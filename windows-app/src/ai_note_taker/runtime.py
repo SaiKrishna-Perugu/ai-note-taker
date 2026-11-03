@@ -59,8 +59,11 @@ def current(root: Path) -> tuple[Path, dict] | None:
     pointer = root / "current.json"
     if not pointer.exists():
         return None
-    session = root / read_json(pointer)["session_id"]
-    return session, read_json(session / "session.json")
+    try:
+        session = root / read_json(pointer)["session_id"]
+        return session, read_json(session / "session.json")
+    except (OSError, ValueError, KeyError):
+        return None          # pointer left behind by a deleted or damaged session
 
 
 def run_session(root: Path, session: Path, config: dict) -> None:
