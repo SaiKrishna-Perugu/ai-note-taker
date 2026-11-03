@@ -3,18 +3,28 @@
 This is a separate desktop copy of the parent project. It adds a native Windows
 interface, pause/resume, a system tray menu, and a floating recorder pill.
 
-## Launch the Windows app
+## Install the Windows app
 
-On this machine, double-click **AI Note Taker.lnk** in this folder. It opens the
-app without a console using this copy's `.venv` and installed Python. The shortcut
-can be recreated with `./create_launcher.ps1` after `uv sync`.
+Download or build `AI-Note-Taker-<version>-win-x64.zip`, extract it, and double-click
+**Install.cmd**. It installs for the current user only (no administrator rights, nothing
+else to install) into `%LOCALAPPDATA%\Programs\AI Note Taker`, adds Start Menu and Desktop
+shortcuts, and registers the app in **Settings > Apps** for uninstalling. Recordings
+(`Documents\AI Note Taker`) and settings (`%APPDATA%\AI Note Taker`) are kept on uninstall.
 
-The portable build is `dist/AI Note Taker/AI Note Taker.exe`. Keep its `_internal`
-folder alongside the executable. **Windows Application Control blocked this
-unsigned build on this PC with error 4551.** A trusted signing or IT approval
-path is required to run that build here. No security settings were changed.
-The installed-Python launcher runs the source application; it requires Python
-and this copy's virtual environment.
+**First run with AI:** press Record once; the app creates `%APPDATA%\AI Note Taker\.env` and
+opens it. Paste your Gemini API key after `GEMINI_API_KEY=`, save, press Record again.
+"Save audio only" needs no key.
+
+**Why it is packaged this way.** Windows Smart App Control blocks new unsigned `.exe` files
+(PyInstaller builds and compiled installers were blocked on the development PC). The package
+therefore ships the official, signed Python runtime from python.org plus the pinned PyPI
+wheels, and the shortcut runs `pythonw.exe -m ai_note_taker.desktop`; the installer is a
+script, not an executable. It needs no signing certificate. If you obtain a code-signing
+certificate, `./build_installer.ps1 -SetupExe` also builds a conventional Inno Setup wizard
+(`packaging/AINoteTaker.iss`) that you can sign.
+
+Run from source instead: `uv sync` then `uv run ai-note-taker-desktop`, or use
+`./create_launcher.ps1` for a shortcut to this folder's `.venv`.
 
 ## Desktop controls
 
@@ -59,12 +69,14 @@ audio; muting or stopping the source itself can produce silence.
 uv sync --group dev
 uv run ai-note-taker-desktop
 uv run python -m unittest discover -s tests -v
-./build_windows.ps1
+./build_installer.ps1
 ```
 
-The build script produces the portable Windows application. A signing certificate
-or an IT-approved distribution route is needed where Application Control rejects
-unsigned executables. To validate hardware without AI, run
+`build_installer.ps1` runs the tests, stages the runtime and packages, smoke-tests the staged
+copy with the bundled interpreter, and writes `dist/installer/AI-Note-Taker-<version>-win-x64.zip`
+(plus a `.sha256`). It needs `uv` and internet access the first time (Python runtime download).
+`build_windows.ps1` (PyInstaller) is kept only for machines that allow unsigned executables.
+To validate hardware without AI, run
 `uv run python tests/check_muted_capture.py`. It temporarily sets zero/mute and
 restores both original settings in `finally`. Automated tests use mocked audio/AI
 and also verify pause exclusion, the floating recorder, and close/quit behaviour.

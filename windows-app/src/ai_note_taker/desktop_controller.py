@@ -1,5 +1,6 @@
 """GUI-independent recorder controls. All audio/AI work runs in a hidden worker."""
 
+import json
 import os
 import subprocess
 import sys
@@ -7,6 +8,31 @@ from pathlib import Path
 
 from ai_note_taker.runtime import create_session, current, is_alive
 from ai_note_taker.storage import read_json, write_json
+
+
+def worker_command(*args: str) -> list[str]:
+    """Command line that runs this app's CLI in a separate hidden process."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--worker", *args]
+    return [sys.executable, "-m", "ai_note_taker", *args]
+
+
+def list_devices(timeout: float = 10.0) -> list[dict]:
+    """Enumerate audio devices in a child process.
+
+    If Windows Audio is slow or stuck, the child blocks instead of the GUI; on timeout it is
+    killed and an error is raised so the window stays responsive.
+    """
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        result = subprocess.run(worker_command("devices"), capture_output=True, text=True,
+                                encoding="utf-8", timeout=timeout, stdin=subprocess.DEVNULL,
+                                creationflags=flags)
+    except subprocess.TimeoutExpired:
+        raise TimeoutError("Windows Audio did not answer") from None
+    if result.returncode != 0:
+        raise RuntimeError("Audio device listing failed")
+    return json.loads(result.stdout)
 
 
 class DesktopController:
@@ -45,12 +71,9 @@ class DesktopController:
             raise RuntimeError("Another recorder is using this recordings folder.")
         session = create_session(self.output)
         write_json(session / "config.json", config)
-        args = ["--output", str(self.output), "--env-file", str(env_file or session / "unused.env"),
-                "_worker", str(session)]
-        if getattr(sys, "frozen", False):
-            command = [sys.executable, "--worker", *args]
-        else:
-            command = [sys.executable, "-m", "ai_note_taker", *args]
+        command = worker_command("--output", str(self.output),
+                                 "--env-file", str(env_file or session / "unused.env"),
+                                 "_worker", str(session))
         flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         environment = os.environ.copy()
         if env_file:

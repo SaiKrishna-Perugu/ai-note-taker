@@ -17,6 +17,6 @@ analysis = Analysis(
 archive = PYZ(analysis.pure)
 exe = EXE(archive, analysis.scripts, [], exclude_binaries=True, name="AI Note Taker",
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          console=False, disable_windowed_traceback=False)
+          console=False, disable_windowed_traceback=False, icon="packaging/app.ico")
 distribution = COLLECT(exe, analysis.binaries, analysis.datas, strip=False, upx=False,
                        name="AI Note Taker")

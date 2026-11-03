@@ -97,7 +97,8 @@ class DesktopTests(unittest.TestCase):
         self.addCleanup(self.dispose)
 
     def make_window(self):
-        with patch("ai_note_taker.desktop.DesktopController", return_value=self.controller):
+        with patch("ai_note_taker.desktop.DesktopController", return_value=self.controller), \
+                patch("ai_note_taker.desktop.list_devices", return_value=[]):
             window = MainWindow(Path(self.temp.name))
         window.timer.stop()
         return window
@@ -116,6 +117,87 @@ class DesktopTests(unittest.TestCase):
         with patch("ai_note_taker.desktop.QApplication.quit") as quit_app:
             self.window.close()
         return quit_app
+
+    def wait_for(self, condition, seconds: float = 3.0) -> bool:
+        import time
+
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if condition():
+                return True
+            time.sleep(0.01)
+        return condition()
+
+    def test_devices_load_in_the_background_and_fill_the_pickers(self):
+        found = [{"index": 3, "name": "Speakers [Loopback]", "loopback": True},
+                 {"index": 7, "name": "Headset Mic", "loopback": False}]
+        with patch("ai_note_taker.desktop.list_devices", return_value=found):
+            self.window.load_devices()
+            self.assertTrue(self.wait_for(lambda: self.window.system.count() == 2))
+        self.assertEqual(self.window.system.itemData(1), 3)
+        self.assertEqual(self.window.mic.itemData(1), 7)
+
+    def test_stuck_audio_service_never_blocks_the_window(self):
+        import threading
+
+        release = threading.Event()
+
+        def hang(timeout):
+            release.wait(5)
+            raise TimeoutError
+
+        with patch("ai_note_taker.desktop.list_devices", side_effect=hang):
+            self.window.load_devices()          # must return immediately even though listing hangs
+            self.assertTrue(self.window.isEnabled())
+            self.window.refresh()               # UI keeps working meanwhile
+            release.set()
+            self.assertTrue(self.wait_for(lambda: "Windows Audio is not answering" in self.window.message.text()))
+        self.assertEqual(self.window.system.count(), 1)   # default entry only
+
+    def test_device_listing_child_process_is_killed_on_timeout(self):
+        import subprocess
+
+        from ai_note_taker import desktop_controller
+
+        with patch("ai_note_taker.desktop_controller.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("devices", 1)):
+            with self.assertRaises(TimeoutError):
+                desktop_controller.list_devices(timeout=1)
+        completed = Mock(returncode=0, stdout='[{"index": 1, "name": "x", "loopback": false}]')
+        with patch("ai_note_taker.desktop_controller.subprocess.run", return_value=completed):
+            self.assertEqual(desktop_controller.list_devices()[0]["index"], 1)
+
+    def test_user_config_is_found_and_created_from_template(self):
+        from ai_note_taker import desktop
+
+        with tempfile.TemporaryDirectory() as appdata, patch.dict(os.environ, {"APPDATA": appdata}):
+            expected = Path(appdata) / "AI Note Taker" / ".env"
+            self.assertEqual(desktop.user_config_path(), expected)
+            self.window.env_file = None
+            self.window.preferences.remove("env_file")
+            with patch("ai_note_taker.desktop.subprocess.Popen") as editor:
+                path = self.window.open_config_for_editing()
+            self.assertEqual(path, expected)
+            self.assertIn("GEMINI_API_KEY=", expected.read_text(encoding="utf-8"))
+            editor.assert_called_once()
+            self.assertEqual(self.window.env_file, expected)
+            # A later launch discovers the per-user file without any project folder around.
+            self.window.env_file = None
+            self.assertEqual(self.window.find_config(), expected)
+
+    def test_recording_without_a_key_opens_the_config_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as appdata, \
+                patch.dict(os.environ, {"APPDATA": appdata}, clear=False), \
+                patch("ai_note_taker.desktop.subprocess.Popen") as editor, \
+                patch("ai_note_taker.desktop.QMessageBox.information") as notice:
+            os.environ.pop("GEMINI_API_KEY", None)
+            self.window.env_file = None
+            self.window.offline.setChecked(False)
+            self.window.record()
+            notice.assert_called_once()
+            editor.assert_called_once()
+            self.controller.start.assert_not_called()
 
     def test_dialogs_use_the_light_app_background(self):
         # Regression: on Windows dark mode the quit prompt text (#292724) was unreadable

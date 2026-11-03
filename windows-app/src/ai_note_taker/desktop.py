@@ -3,11 +3,13 @@
 import argparse
 import math
 import os
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from dotenv import dotenv_values
-from PySide6.QtCore import QEvent, QSettings, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
@@ -16,12 +18,23 @@ from PySide6.QtWidgets import (
 )
 
 from ai_note_taker.ai import DEFAULT_MODEL
-from ai_note_taker.audio import devices
-from ai_note_taker.desktop_controller import DesktopController
+from ai_note_taker.desktop_controller import DesktopController, list_devices
 from ai_note_taker.popup import CapsuleRecorder
 
 ACTIVE = {"starting", "recording", "paused", "processing"}
 _fonts_loaded = False
+ENV_TEMPLATE = """# AI Note Taker settings. Keep this file private; never share your key.
+# Create a key at https://aistudio.google.com/apikey and paste it below.
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+ALM_LLM_PROVIDER=aistudio
+"""
+
+
+def user_config_path() -> Path:
+    """Per-user settings file used by the installed app (survives upgrades)."""
+    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return Path(base) / "AI Note Taker" / ".env"
 
 
 def load_fonts() -> None:
@@ -106,6 +119,25 @@ def icon() -> QIcon:
         painter.drawRoundedRect(x, (64-height)//2, 5, height, 2, 2)
     painter.end()
     return QIcon(pixmap)
+
+
+class DeviceLoader(QObject):
+    """Lists audio devices off the UI thread (and in a child process) so a stuck Windows Audio
+    service can never freeze the window."""
+
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def start(self, timeout: float = 10.0) -> None:
+        def work() -> None:
+            try:
+                self.loaded.emit(list_devices(timeout))
+            except TimeoutError:
+                self.failed.emit("Windows Audio is not answering. Default devices will be used.")
+            except Exception as exc:
+                self.failed.emit(f"Could not list audio devices ({type(exc).__name__}).")
+
+        threading.Thread(target=work, daemon=True, name="device-loader").start()
 
 
 class Waveform(QWidget):
@@ -298,17 +330,40 @@ class MainWindow(QMainWindow):
         self.update_config_label()
         self.refresh()
         # Device enumeration is short, but defer it until the window is painted.
+        self.device_loader = DeviceLoader(self)
+        self.device_loader.loaded.connect(self.apply_devices)
+        self.device_loader.failed.connect(self.devices_failed)
         QTimer.singleShot(100, self.load_devices)
 
     def find_config(self) -> Path | None:
         saved = self.preferences.value("env_file", "")
         if saved and Path(saved).is_file():
             return Path(saved)
+        if user_config_path().is_file():
+            return user_config_path()
+        if "site-packages" in Path(__file__).resolve().parts:
+            # Installed copy: only the explicit/per-user config applies, never a stray .env
+            # that happens to sit in a parent folder such as the user profile.
+            return None
         start = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
         for parent in (start, *list(start.parents)[:5]):
             if (parent / ".env").is_file():
                 return parent / ".env"
         return None
+
+    def open_config_for_editing(self) -> Path:
+        """Create the per-user config from a template if needed and open it in an editor."""
+        path = self.env_file or user_config_path()
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(ENV_TEMPLATE, encoding="utf-8")
+        self.env_file = path
+        self.update_config_label()
+        if sys.platform == "win32":
+            subprocess.Popen(["notepad.exe", str(path)])
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        return path
 
     def update_config_label(self) -> None:
         values = dotenv_values(self.env_file) if self.env_file else {}
@@ -317,14 +372,19 @@ class MainWindow(QMainWindow):
         self.config_label.setToolTip(str(self.env_file or "Uses environment variables"))
 
     def load_devices(self) -> None:
+        if not self.quitting:
+            self.device_loader.start()
+
+    def apply_devices(self, found: list) -> None:
         if self.quitting:
             return
-        try:
-            for device in devices():
-                combo = self.system if device["loopback"] else self.mic
-                combo.addItem(f"{device['index']} · {device['name']}", device["index"])
-        except Exception as exc:
-            self.message.setText(f"Could not list audio devices ({type(exc).__name__}).")
+        for device in found:
+            combo = self.system if device["loopback"] else self.mic
+            combo.addItem(f"{device['index']} · {device['name']}", device["index"])
+
+    def devices_failed(self, text: str) -> None:
+        if not self.quitting:
+            self.message.setText(text)
 
     def choose_config(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose AI configuration", "", "Environment files (*.env);;All files (*)")
@@ -352,8 +412,12 @@ class MainWindow(QMainWindow):
         mode = values.get("ALM_LLM_PROVIDER", values.get("AUTH_MODE", "aistudio"))
         if not self.offline.isChecked() and mode not in ("vertex_adc", "vertex", "vertex_iam") and not values.get("GEMINI_API_KEY"):
             self.restore()
-            QMessageBox.information(self, "AI configuration needed",
-                                    "Choose a .env file with GEMINI_API_KEY, or enable Save audio only.")
+            path = self.open_config_for_editing()
+            QMessageBox.information(
+                self, "Add your Gemini API key",
+                "Paste your Gemini API key after GEMINI_API_KEY= in the file that just opened, "
+                "save it, then press Record again.\n\n"
+                f"{path}\n\nOr tick “Save audio only” to record without AI.")
             return
         config = {"microphone": self.microphone.isChecked(), "system_device": self.system.currentData(),
                   "mic_device": self.mic.currentData() if self.microphone.isChecked() else None,
@@ -567,3 +631,7 @@ def main() -> None:
     window = MainWindow(output, args.env_file)
     window.show()
     raise SystemExit(application.exec())
+
+
+if __name__ == "__main__":
+    main()
