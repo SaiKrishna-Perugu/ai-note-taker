@@ -11,9 +11,17 @@ else to install) into `%LOCALAPPDATA%\Programs\AI Note Taker`, adds Start Menu a
 shortcuts, and registers the app in **Settings > Apps** for uninstalling. Recordings
 (`Documents\AI Note Taker`) and settings (`%APPDATA%\AI Note Taker`) are kept on uninstall.
 
-**First run with AI:** press Record once; the app creates `%APPDATA%\AI Note Taker\.env` and
-opens it. Paste your Gemini API key after `GEMINI_API_KEY=`, save, press Record again.
-"Save audio only" needs no key.
+**First run with AI:** press Record. If there is no Gemini API key yet, the app asks for it
+(create one at <https://aistudio.google.com/apikey>) and stores it in
+`%APPDATA%\AI Note Taker\.env`, then starts recording. You can also use **Set Gemini API key…**
+or **Choose .env file…** in the AI configuration panel. The chip on the recorder card always
+shows what you will get: **AI TRANSCRIPT ON**, **AUDIO ONLY · NO TRANSCRIPT** ("Save audio only"
+is ticked) or **AI KEY NEEDED**.
+
+**No transcript for a recording?** An amber bar above the recorder says why and offers one
+button: **Transcribe now** (for audio saved without AI), **Retry transcription** (when the AI
+request failed, e.g. a bad key or no internet) or **Retry notes**. Select any past recording in
+the sidebar to transcribe it later.
 
 **Why it is packaged this way.** Windows Smart App Control blocks new unsigned `.exe` files
 (PyInstaller builds and compiled installers were blocked on the development PC). The package

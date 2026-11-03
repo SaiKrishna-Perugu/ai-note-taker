@@ -12,9 +12,9 @@ from dotenv import dotenv_values
 from PySide6.QtCore import QEvent, QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QSizePolicy, QSystemTrayIcon, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSystemTrayIcon, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from ai_note_taker.ai import DEFAULT_MODEL
@@ -35,6 +35,35 @@ def user_config_path() -> Path:
     """Per-user settings file used by the installed app (survives upgrades)."""
     base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     return Path(base) / "AI Note Taker" / ".env"
+
+
+def save_api_key(key: str) -> Path:
+    """Store the Gemini key in the per-user settings file, keeping its other settings."""
+    key = key.strip()
+    if not key or any(character.isspace() for character in key):
+        raise ValueError("That does not look like an API key (it contains spaces or line breaks).")
+    path = user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else ENV_TEMPLATE.splitlines()
+    saved, replaced = [], False
+    for line in lines:
+        if line.split("=", 1)[0].strip() == "GEMINI_API_KEY":
+            saved.append(f"GEMINI_API_KEY={key}")
+            replaced = True
+        else:
+            saved.append(line)
+    if not replaced:
+        saved.append(f"GEMINI_API_KEY={key}")
+    path.write_text("\n".join(saved) + "\n", encoding="utf-8")
+    return path
+
+
+def set_tone(widget: QWidget, tone: str) -> None:
+    """Switch a styled label between look variants (ok / warn / off) defined in STYLE."""
+    if widget.property("tone") != tone:
+        widget.setProperty("tone", tone)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
 
 def load_fonts() -> None:
@@ -63,6 +92,17 @@ QMessageBox QLabel { color: #292724; }
 #muted { color: #817d75; }
 #status { color: #925137; background: #f5e5db; border-radius: 11px; padding: 5px 12px; font-weight: 600; }
 #time { font-size: 43px; font-weight: 600; letter-spacing: -1px; }
+#chip { border-radius: 11px; padding: 5px 12px; font-size: 11px; font-weight: 650; }
+#chip[tone="ok"] { color: #35602a; background: #e1eddb; }
+#chip[tone="warn"] { color: #925137; background: #f5e5db; }
+#chip[tone="off"] { color: #6f6b63; background: #ebeae4; }
+#settingsScroll, #settingsInner { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 4px 1px; }
+QScrollBar::handle:vertical { background: #cfcabd; border-radius: 3px; min-height: 28px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; background: transparent; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+#notice { background: #fbf0df; border: 1px solid #efd7b0; border-radius: 12px; }
+#noticeText { color: #6b4311; font-weight: 600; }
 QPushButton { background: #fff; border: 1px solid #dcd9d1; border-radius: 8px; padding: 9px 14px; font-weight: 600; }
 QPushButton:hover { background: #f1eee7; border-color: #c0baad; }
 QPushButton:pressed { background: #e7e1d6; }
@@ -216,6 +256,19 @@ class MainWindow(QMainWindow):
         body.addLayout(header)
         self.message = label("Record your meeting. Get a transcript and useful notes.", "muted", True)
         body.addWidget(self.message)
+        # Amber call-to-action shown when a transcript cannot appear without the user doing something.
+        self.notice = QFrame()
+        self.notice.setObjectName("notice")
+        notice_row = QHBoxLayout(self.notice)
+        notice_row.setContentsMargins(16, 10, 10, 10)
+        self.notice_text = label("", "noticeText", True)
+        notice_row.addWidget(self.notice_text, 1)
+        self.notice_button = button("", self.notice_action, True)
+        notice_row.addWidget(self.notice_button)
+        self.notice_kind = ""
+        self.notice.hide()
+        body.addWidget(self.notice)
+        self.transcribe_started = False
 
         columns = QHBoxLayout()
         columns.setSpacing(20)
@@ -228,6 +281,9 @@ class MainWindow(QMainWindow):
         self.badge = label("Ready to record", "status")
         state_row.addWidget(self.badge)
         state_row.addStretch()
+        self.ai_chip = label("", "chip")
+        self.ai_chip.setAccessibleName("AI transcription status")
+        state_row.addWidget(self.ai_chip)
         self.source_label = label("SYSTEM AUDIO", "eyebrow")
         state_row.addWidget(self.source_label)
         recording.addLayout(state_row)
@@ -267,7 +323,19 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("settings")
         panel.setFixedWidth(255)
-        settings = QVBoxLayout(panel)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        # Scrollable so settings are never squashed or clipped on short windows.
+        scroller = QScrollArea()
+        scroller.setObjectName("settingsScroll")
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.Shape.NoFrame)
+        scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        panel_layout.addWidget(scroller)
+        inner = QWidget()
+        inner.setObjectName("settingsInner")
+        scroller.setWidget(inner)
+        settings = QVBoxLayout(inner)
         settings.setContentsMargins(17, 20, 17, 18)
         settings.setSpacing(10)
         settings.addWidget(label("CAPTURE SETTINGS", "eyebrow"))
@@ -287,7 +355,9 @@ class MainWindow(QMainWindow):
         self.microphone.toggled.connect(self.mic.setEnabled)
         settings.addWidget(self.mic)
         self.offline = QCheckBox("Save audio only")
-        self.offline.setToolTip("No AI requests. You can transcribe this session later from the CLI.")
+        self.offline.setToolTip("No AI requests while recording. You can transcribe the session later "
+                                "with the Transcribe now button.")
+        self.offline.toggled.connect(lambda _checked: self.update_chip())
         settings.addWidget(self.offline)
         settings.addWidget(label("Spoken language"))
         self.language = QLineEdit("auto")
@@ -297,6 +367,9 @@ class MainWindow(QMainWindow):
         settings.addWidget(label("AI CONFIGURATION", "eyebrow"))
         self.config_label = label("", "muted", True)
         settings.addWidget(self.config_label)
+        self.key_button = button("Set Gemini API key…", self.set_api_key)
+        self.key_button.setAccessibleName("Set Gemini API key")
+        settings.addWidget(self.key_button)
         self.config_button = button("Choose .env file…", self.choose_config)
         settings.addWidget(self.config_button)
         settings.addWidget(button("Change recordings folder…", self.choose_output))
@@ -351,25 +424,120 @@ class MainWindow(QMainWindow):
                 return parent / ".env"
         return None
 
-    def open_config_for_editing(self) -> Path:
-        """Create the per-user config from a template if needed and open it in an editor."""
-        path = self.env_file or user_config_path()
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(ENV_TEMPLATE, encoding="utf-8")
+    def ai_values(self) -> dict:
+        # Blank lines (e.g. the template's empty GEMINI_API_KEY=) must not hide a real value.
+        extra = {k: v for k, v in dotenv_values(self.env_file).items() if v} if self.env_file else {}
+        return {**os.environ, **extra}
+
+    def has_ai_credentials(self) -> bool:
+        values = self.ai_values()
+        mode = values.get("ALM_LLM_PROVIDER", values.get("AUTH_MODE", "aistudio"))
+        return mode in ("vertex_adc", "vertex", "vertex_iam") or bool(values.get("GEMINI_API_KEY"))
+
+    def ai_state(self) -> str:
+        """off = audio only, key = AI wanted but no key, ready = transcripts will be produced."""
+        if self.offline.isChecked():
+            return "off"
+        return "ready" if self.has_ai_credentials() else "key"
+
+    def update_chip(self) -> None:
+        state = self.ai_state()
+        text, tone = {"ready": ("AI TRANSCRIPT ON", "ok"),
+                      "off": ("AUDIO ONLY · NO TRANSCRIPT", "off"),
+                      "key": ("AI KEY NEEDED", "warn")}[state]
+        self.ai_chip.setText(text)
+        set_tone(self.ai_chip, tone)
+        self.ai_chip.setToolTip({"ready": "Audio is sent to Gemini; you get a transcript and notes.",
+                                 "off": "Nothing is sent to AI. Untick “Save audio only” for transcripts, "
+                                        "or use Transcribe now later.",
+                                 "key": "Add a Gemini API key to get transcripts."}[state])
+
+    def prompt_for_api_key(self) -> bool:
+        key, accepted = QInputDialog.getText(
+            self, "Gemini API key",
+            "Paste your Gemini API key (create one at aistudio.google.com/apikey).\n"
+            "It is stored only on this PC, in your user settings. Audio is sent to Google's Gemini API "
+            "when AI is on.", QLineEdit.EchoMode.Password)
+        if not accepted or not key.strip():
+            return False
+        try:
+            path = save_api_key(key)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Gemini API key", str(exc))
+            return False
         self.env_file = path
+        self.preferences.setValue("env_file", str(path))
         self.update_config_label()
-        if sys.platform == "win32":
-            subprocess.Popen(["notepad.exe", str(path)])
-        else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
-        return path
+        self.update_chip()
+        return True
+
+    def set_api_key(self) -> None:
+        if self.prompt_for_api_key():
+            self.message.setText("API key saved. Transcripts are on for your next recording.")
+            self.refresh()
 
     def update_config_label(self) -> None:
         values = dotenv_values(self.env_file) if self.env_file else {}
         provider = values.get("ALM_LLM_PROVIDER") or os.getenv("ALM_LLM_PROVIDER", "aistudio")
-        self.config_label.setText(f"{provider}\n{self.env_file.name if self.env_file else 'Environment variables'}")
+        key = "API key set" if self.has_ai_credentials() else "API key missing"
+        self.config_label.setText(f"{provider} · {key}\n{self.env_file.name if self.env_file else 'Environment variables'}")
         self.config_label.setToolTip(str(self.env_file or "Uses environment variables"))
+
+    def effective_session(self) -> Path | None:
+        return self.selected or self.controller.effective_session()
+
+    def update_notice(self, active: bool) -> None:
+        """Tell the user exactly what stands between them and a transcript, with one button to fix it."""
+        kind, text, action = "", "", ""
+        if self.controller.transcribing():
+            kind, text = "busy", "Transcribing your recording… text appears below as each part finishes."
+        elif not active:
+            session = None if self.view_new else self.effective_session()
+            info = self.controller.summary(session) if session else {}
+            if info.get("pending"):
+                if info.get("errors"):
+                    code = f" (error {info['http_status']})" if info.get("http_status") else ""
+                    kind, action = "retry", "Retry transcription"
+                    text = (f"Transcription failed for {info['errors']} part(s){code}. "
+                            "Check your API key and internet connection, then retry.")
+                elif info.get("record_only"):
+                    kind, action = "transcribe", "Transcribe now"
+                    text = "This recording was saved without AI, so it has no transcript yet."
+                else:
+                    kind, action = "transcribe", "Transcribe now"
+                    text = "Some of this recording has not been transcribed yet."
+            elif info.get("processing") in ("notes_failed", "failed"):
+                kind, action = "retry", "Retry notes"
+                text = "Your transcript is ready, but the meeting notes could not be generated. Retry to create them."
+            elif self.ai_state() == "key":
+                kind, action = "key", "Set API key…"
+                text = "Add your Gemini API key to get transcripts and notes. Until then, recordings are saved as audio only."
+        self.notice_kind = kind
+        self.notice.setVisible(bool(kind))
+        self.notice_text.setText(text)
+        self.notice_button.setText(action)
+        self.notice_button.setVisible(bool(action))
+
+    def notice_action(self) -> None:
+        if self.notice_kind == "key":
+            self.set_api_key()
+        elif self.notice_kind in ("transcribe", "retry"):
+            self.transcribe_selected()
+
+    def transcribe_selected(self) -> None:
+        session = self.effective_session()
+        if session is None or self.status in ACTIVE or self.controller.transcribing():
+            return
+        if not self.has_ai_credentials() and not self.prompt_for_api_key():
+            return
+        try:
+            self.controller.transcribe(session, self.env_file)
+        except Exception as exc:
+            self.message.setText(str(exc))
+            return
+        self.transcribe_started = True
+        self.message.setText("Transcribing…")
+        self.refresh()
 
     def load_devices(self) -> None:
         if not self.quitting:
@@ -407,18 +575,12 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def record(self) -> None:
-        values = {**os.environ, **({k: v for k, v in dotenv_values(self.env_file).items() if v is not None}
-                                  if self.env_file else {})}
-        mode = values.get("ALM_LLM_PROVIDER", values.get("AUTH_MODE", "aistudio"))
-        if not self.offline.isChecked() and mode not in ("vertex_adc", "vertex", "vertex_iam") and not values.get("GEMINI_API_KEY"):
+        if self.ai_state() == "key":
             self.restore()
-            path = self.open_config_for_editing()
-            QMessageBox.information(
-                self, "Add your Gemini API key",
-                "Paste your Gemini API key after GEMINI_API_KEY= in the file that just opened, "
-                "save it, then press Record again.\n\n"
-                f"{path}\n\nOr tick “Save audio only” to record without AI.")
-            return
+            if not self.prompt_for_api_key():
+                self.message.setText("No API key yet. Add one for transcripts, or tick “Save audio only”.")
+                return
+        values = self.ai_values()
         config = {"microphone": self.microphone.isChecked(), "system_device": self.system.currentData(),
                   "mic_device": self.mic.currentData() if self.microphone.isChecked() else None,
                   "record_only": self.offline.isChecked(), "chunk_seconds": 20, "duration": None,
@@ -568,34 +730,43 @@ class MainWindow(QMainWindow):
         seconds = int(state.get("active_seconds", 0))
         clock = f"{seconds//3600:02}:{seconds//60%60:02}:{seconds%60:02}" if seconds >= 3600 else f"{seconds//60:02}:{seconds%60:02}"
         self.clock.setText(clock)
-        self.record_button.setEnabled(not busy)
+        transcribing = self.controller.transcribing()
+        announcement = ""
+        if self.transcribe_started and not transcribing:
+            self.transcribe_started = False
+            announcement = ("Transcript ready." if self.controller.transcribe_returncode() == 0 else
+                            "Transcription did not finish. Use the button above to retry.")
+        self.record_button.setEnabled(not busy and not transcribing)
         self.pause_button.setEnabled(self.status in ("recording", "paused"))
         self.pause_button.setText("Resume" if self.status == "paused" else "Pause")
         self.stop_button.setEnabled(self.status in ("recording", "paused", "starting"))
-        for widget in (self.system, self.microphone, self.offline, self.config_button, self.language):
+        for widget in (self.system, self.microphone, self.offline, self.config_button, self.key_button, self.language):
             widget.setEnabled(not busy)
         self.mic.setEnabled(not busy and self.microphone.isChecked())
         self.source_label.setText("SYSTEM + MIC" if state.get("config", {}).get("microphone") else "SYSTEM AUDIO")
         messages = {"recording": "Listening to system audio. New transcript chunks appear about every 20 seconds.",
                     "paused": "Recording paused. Audio during this pause is discarded.",
                     "processing": "Audio saved. Gemini is finishing your transcript and meeting notes…",
-                    "starting": "Opening the audio devices…", "stopped": "Recording saved.",
+                    "starting": "Opening the audio devices…",
+                    "stopped": "Recording saved.",
                     "interrupted": "Recording was interrupted. Saved audio can be recovered with the CLI.",
                     "failed": state.get("error", f"Recorder failed ({state.get('error_type', 'unknown')}). See recorder.log.")}
         if self.status in messages:
             message = messages[self.status]
             processing = state.get("processing", {})
-            if self.status == "stopped" and processing.get("status") in ("pending", "notes_failed", "failed"):
-                message += " Some AI work is pending; use the CLI transcribe command to retry."
-            elif self.status == "stopped" and processing.get("status") == "complete":
-                message += " Transcript and meeting notes are ready."
+            if self.status == "stopped" and processing.get("status") == "complete":
+                message = "Recording saved. Transcript and meeting notes are ready."
             elif state.get("config", {}).get("record_only"):
                 message = "Recording audio locally. AI is disabled." if self.status == "recording" else message
             self.message.setText(message)
+        if announcement:
+            self.message.setText(announcement)
         self.waveform.level = max(state.get("levels", {}).values(), default=0) if self.status == "recording" else 0
         self.waveform.phase += 1
         self.waveform.update()
-        self.popup.update_state(self.status, clock)
+        self.popup.update_state("processing" if transcribing else self.status, clock)
+        self.update_chip()
+        self.update_notice(busy)
         self.tray.setToolTip(f"AI Note Taker · {title} · {clock}")
         sessions = self.controller.sessions()
         ids = [str(path) for path in sessions]

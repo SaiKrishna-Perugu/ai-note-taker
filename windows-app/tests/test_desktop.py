@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
@@ -82,15 +83,36 @@ class DesktopTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        # Never touch the real user's app settings (Windows registry) from tests.
+        cls.settings_dir = tempfile.TemporaryDirectory()
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, cls.settings_dir.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
+        cls.settings_dir.cleanup()
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # Hermetic environment: temp per-user config folder, no ambient key, explicit test key file.
+        environment = patch.dict(os.environ, {"APPDATA": str(Path(self.temp.name) / "appdata")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GEMINI_API_KEY", None)
+        self.env_path = Path(self.temp.name) / "test.env"
+        self.env_path.write_text("GEMINI_API_KEY=test-key\n", encoding="utf-8")
         self.controller = Mock()
         self.controller.output = Path(self.temp.name)
         self.controller.session = None
         self.controller.snapshot.return_value = {"status": "idle"}
         self.controller.sessions.return_value = []
+        self.controller.effective_session.return_value = None
+        self.controller.summary.return_value = {"chunks": 0, "transcribed": 0, "pending": 0,
+                                                "errors": 0, "record_only": False}
+        self.controller.transcribing.return_value = False
+        self.controller.transcribe_returncode.return_value = None
         self.controller.transcript.return_value = ""
         self.controller.notes.return_value = ""
         self.window = self.make_window()
@@ -99,7 +121,7 @@ class DesktopTests(unittest.TestCase):
     def make_window(self):
         with patch("ai_note_taker.desktop.DesktopController", return_value=self.controller), \
                 patch("ai_note_taker.desktop.list_devices", return_value=[]):
-            window = MainWindow(Path(self.temp.name))
+            window = MainWindow(Path(self.temp.name), self.env_path)
         window.timer.stop()
         return window
 
@@ -168,36 +190,163 @@ class DesktopTests(unittest.TestCase):
         with patch("ai_note_taker.desktop_controller.subprocess.run", return_value=completed):
             self.assertEqual(desktop_controller.list_devices()[0]["index"], 1)
 
-    def test_user_config_is_found_and_created_from_template(self):
+    # --- API key, AI status and "why is there no transcript?" -------------------------------
+
+    def no_key(self, appdata: str):
+        """Per-user config in a temp APPDATA and no key anywhere in the environment."""
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(patch.dict(os.environ, {"APPDATA": appdata}))
+        os.environ.pop("GEMINI_API_KEY", None)
+        self.window.env_file = None
+        self.window.preferences.remove("env_file")
+        self.window.offline.setChecked(False)
+        self.addCleanup(stack.close)
+        return stack
+
+    def with_key(self) -> None:
+        os.environ["GEMINI_API_KEY"] = "k"
+        self.addCleanup(os.environ.pop, "GEMINI_API_KEY", None)
+
+    def test_save_api_key_creates_updates_and_validates(self):
         from ai_note_taker import desktop
 
         with tempfile.TemporaryDirectory() as appdata, patch.dict(os.environ, {"APPDATA": appdata}):
-            expected = Path(appdata) / "AI Note Taker" / ".env"
-            self.assertEqual(desktop.user_config_path(), expected)
-            self.window.env_file = None
-            self.window.preferences.remove("env_file")
-            with patch("ai_note_taker.desktop.subprocess.Popen") as editor:
-                path = self.window.open_config_for_editing()
-            self.assertEqual(path, expected)
-            self.assertIn("GEMINI_API_KEY=", expected.read_text(encoding="utf-8"))
-            editor.assert_called_once()
-            self.assertEqual(self.window.env_file, expected)
-            # A later launch discovers the per-user file without any project folder around.
-            self.window.env_file = None
-            self.assertEqual(self.window.find_config(), expected)
+            path = desktop.save_api_key("  key-one  ")
+            self.assertEqual(path, Path(appdata) / "AI Note Taker" / ".env")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("GEMINI_API_KEY=key-one\n", text)
+            self.assertIn("GEMINI_MODEL=gemini-2.5-flash", text)          # template settings kept
+            path.write_text(text + "EXTRA=1\n", encoding="utf-8")
+            desktop.save_api_key("key-two")
+            updated = path.read_text(encoding="utf-8")
+            self.assertEqual(updated.count("GEMINI_API_KEY="), 1)
+            self.assertIn("GEMINI_API_KEY=key-two", updated)
+            self.assertIn("EXTRA=1", updated)
+            for bad in ("", "   ", "two words", "key\nINJECTED=1"):
+                with self.assertRaises(ValueError):
+                    desktop.save_api_key(bad)
 
-    def test_recording_without_a_key_opens_the_config_instead_of_failing(self):
-        with tempfile.TemporaryDirectory() as appdata, \
-                patch.dict(os.environ, {"APPDATA": appdata}, clear=False), \
-                patch("ai_note_taker.desktop.subprocess.Popen") as editor, \
-                patch("ai_note_taker.desktop.QMessageBox.information") as notice:
-            os.environ.pop("GEMINI_API_KEY", None)
-            self.window.env_file = None
-            self.window.offline.setChecked(False)
-            self.window.record()
-            notice.assert_called_once()
-            editor.assert_called_once()
+    def test_blank_template_key_does_not_override_a_real_environment_key(self):
+        blank = Path(self.temp.name) / "blank.env"
+        blank.write_text("GEMINI_API_KEY=\n", encoding="utf-8")
+        self.window.env_file = blank
+        self.assertFalse(self.window.has_ai_credentials())
+        os.environ["GEMINI_API_KEY"] = "from-environment"
+        self.addCleanup(os.environ.pop, "GEMINI_API_KEY", None)
+        self.assertTrue(self.window.has_ai_credentials())
+
+    def test_user_config_is_discovered_by_a_later_launch(self):
+        from ai_note_taker import desktop
+
+        with tempfile.TemporaryDirectory() as appdata, patch.dict(os.environ, {"APPDATA": appdata}):
+            desktop.save_api_key("abc")
+            self.window.preferences.remove("env_file")
+            self.assertEqual(self.window.find_config(), Path(appdata) / "AI Note Taker" / ".env")
+
+    def test_pressing_record_without_a_key_asks_for_it_then_records(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            self.no_key(appdata)
+            with patch("ai_note_taker.desktop.QInputDialog.getText", return_value=("secret-key", True)) as ask:
+                self.window.record()
+            ask.assert_called_once()
+            self.controller.start.assert_called_once()
+            config, env_file = self.controller.start.call_args.args
+            self.assertFalse(config["record_only"])
+            self.assertEqual(Path(env_file), Path(appdata) / "AI Note Taker" / ".env")
+            self.assertIn("GEMINI_API_KEY=secret-key", Path(env_file).read_text(encoding="utf-8"))
+
+    def test_cancelling_the_key_prompt_does_not_record_and_explains(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            self.no_key(appdata)
+            with patch("ai_note_taker.desktop.QInputDialog.getText", return_value=("", False)):
+                self.window.record()
             self.controller.start.assert_not_called()
+            self.assertIn("API key", self.window.message.text())
+
+    def test_ai_chip_says_whether_a_transcript_will_be_made(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            self.no_key(appdata)
+            self.window.update_chip()
+            self.assertEqual(self.window.ai_chip.text(), "AI KEY NEEDED")
+            self.assertEqual(self.window.ai_chip.property("tone"), "warn")
+            self.window.offline.setChecked(True)
+            self.assertEqual(self.window.ai_chip.text(), "AUDIO ONLY · NO TRANSCRIPT")
+            self.assertEqual(self.window.ai_chip.property("tone"), "off")
+            os.environ["GEMINI_API_KEY"] = "k"
+            self.window.offline.setChecked(False)
+            self.assertEqual(self.window.ai_chip.text(), "AI TRANSCRIPT ON")
+            self.assertEqual(self.window.ai_chip.property("tone"), "ok")
+
+    def test_audio_only_recording_offers_transcribe_now(self):
+        session = Path(self.temp.name) / "20261103-120000-abcd1234"
+        self.controller.effective_session.return_value = session
+        self.controller.summary.return_value = {"pending": 3, "errors": 0, "record_only": True}
+        self.controller.snapshot.return_value = {"status": "stopped", "config": {"record_only": True}}
+        self.with_key()
+        self.window.refresh()
+        self.assertFalse(self.window.notice.isHidden())
+        self.assertIn("saved without AI", self.window.notice_text.text())
+        self.assertEqual(self.window.notice_button.text(), "Transcribe now")
+        self.assertEqual(self.window.message.text(), "Recording saved.")   # the notice carries the detail
+        self.window.notice_button.click()
+        self.controller.transcribe.assert_called_once_with(session, self.window.env_file)
+
+    def test_transcribe_now_asks_for_a_key_first_when_missing(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            self.no_key(appdata)
+            self.controller.effective_session.return_value = Path(self.temp.name) / "s"
+            self.controller.summary.return_value = {"pending": 1, "errors": 0, "record_only": True}
+            self.controller.snapshot.return_value = {"status": "stopped"}
+            self.window.refresh()
+            with patch("ai_note_taker.desktop.QInputDialog.getText", return_value=("", False)):
+                self.window.notice_button.click()
+            self.controller.transcribe.assert_not_called()
+
+    def test_failed_transcription_is_visible_with_a_retry(self):
+        self.controller.effective_session.return_value = Path(self.temp.name) / "s"
+        self.controller.summary.return_value = {"pending": 2, "errors": 2, "http_status": 400,
+                                                "error_type": "ClientError", "record_only": False}
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.with_key()
+        self.window.refresh()
+        self.assertIn("failed for 2 part(s) (error 400)", self.window.notice_text.text())
+        self.assertEqual(self.window.notice_button.text(), "Retry transcription")
+
+    def test_notice_reports_progress_and_blocks_recording_while_transcribing(self):
+        self.controller.transcribing.return_value = True
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.window.refresh()
+        self.assertIn("Transcribing", self.window.notice_text.text())
+        self.assertTrue(self.window.notice_button.isHidden())
+        self.assertFalse(self.window.record_button.isEnabled())
+        self.assertFalse(self.window.popup.start_button.isEnabled())
+
+    def test_finished_transcription_is_announced(self):
+        self.window.transcribe_started = True
+        self.controller.transcribe_returncode.return_value = 0
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.window.refresh()
+        self.assertEqual(self.window.message.text(), "Transcript ready.")
+        self.assertFalse(self.window.transcribe_started)
+
+    def test_failed_notes_offer_a_retry_even_though_the_transcript_exists(self):
+        self.controller.effective_session.return_value = Path(self.temp.name) / "s"
+        self.controller.summary.return_value = {"pending": 0, "errors": 0, "record_only": False,
+                                                "processing": "notes_failed"}
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.with_key()
+        self.window.refresh()
+        self.assertIn("meeting notes could not be generated", self.window.notice_text.text())
+        self.assertEqual(self.window.notice_button.text(), "Retry notes")
+
+    def test_no_notice_when_everything_is_transcribed(self):
+        self.with_key()
+        self.controller.effective_session.return_value = Path(self.temp.name) / "s"
+        self.controller.snapshot.return_value = {"status": "stopped"}
+        self.window.refresh()
+        self.assertTrue(self.window.notice.isHidden())
 
     def test_dialogs_use_the_light_app_background(self):
         # Regression: on Windows dark mode the quit prompt text (#292724) was unreadable

@@ -35,6 +35,20 @@ function Stop-RunningApp {
     Start-Sleep 1
 }
 
+function Clear-InstallDir([string]$Keep = '') {
+    # Empty the folder but never delete the folder itself: Explorer, antivirus or an indexer can hold a
+    # handle on it, which makes deleting the directory fail even though every file inside is free.
+    foreach ($attempt in 1..5) {
+        $failed = @()
+        Get-ChildItem $InstallDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $Keep } | ForEach-Object {
+            try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop } catch { $failed += $_.FullName }
+        }
+        if (-not $failed) { return }
+        Start-Sleep 1
+    }
+    throw "Could not remove: $($failed -join ', '). Close anything using the AI Note Taker folder and try again."
+}
+
 function New-Shortcut([string]$Path) {
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($Path)
@@ -53,7 +67,7 @@ if ($Uninstall) {
     Remove-Item $RegistryKey -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $InstallDir) {
         # Remove everything except this running script, then delete the folder once we have exited.
-        Get-ChildItem $InstallDir -Force | Where-Object { $_.Name -ne 'Setup' } | Remove-Item -Recurse -Force
+        Clear-InstallDir -Keep 'Setup'
         $command = "ping 127.0.0.1 -n 3 >nul & rmdir /s /q `"$InstallDir`""
         Start-Process cmd.exe -ArgumentList '/c', $command -WindowStyle Hidden
     }
@@ -72,7 +86,7 @@ if (-not $version) { $version = '0.0.0' }
 
 Write-Output "Installing $AppName $version to $InstallDir ..."
 Stop-RunningApp
-if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
+if (Test-Path $InstallDir) { Clear-InstallDir }
 New-Item -ItemType Directory $InstallDir -Force | Out-Null
 $null = robocopy $source $InstallDir /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1   # exit codes below 8 mean success
 if ($LASTEXITCODE -ge 8) { throw "Copying the app files failed (robocopy exit code $LASTEXITCODE)." }
