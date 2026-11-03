@@ -1,7 +1,7 @@
 # AI Note Taker Desktop
 
 This is a separate desktop copy of the parent project. It adds a native Windows
-interface, pause/resume, a system tray menu, and a draggable mini recorder.
+interface, pause/resume, a system tray menu, and a floating recorder pill.
 
 ## Launch the Windows app
 
@@ -22,16 +22,16 @@ and this copy's virtual environment.
 - **Pause / Resume:** discard audio while paused, then continue in the same session.
   Previously captured chunks can still finish transcribing during a pause.
 - **Stop:** save the final audio chunk, finish transcription, and generate notes.
-- **Minimize / Mini recorder:** keep the main window minimized in the Windows
-  taskbar and show a small, circular recorder bubble. Drag the circle to reposition
-  it. Click it for recording controls; **Collapse to circle** makes it compact again.
-- **− on the bubble or controls:** minimize the popup too, while recording keeps
-  running. Restore the main window from the taskbar or tray whenever needed.
-- **× on the recorder controls:** dismiss the popup while recording continues.
-  Restoring the main window also hides the floating bubble automatically.
-- **Close:** keep the mini recorder available. Use **Quit** from the tray menu to
-  exit, or use **Quit app** on the mini recorder; an active worker stops capture
-  and finishes saving in the background.
+- **Minimize / Floating recorder:** minimizing the main window shows a slim vertical
+  pill with **Start**, **Pause/Resume** and **Stop** buttons and the elapsed time.
+  Drag it to reposition; the position is remembered. Restoring the main window
+  hides it.
+- **× at the top of the pill:** closes the popup only. Recording continues. Bring it
+  back from the tray menu (**Show floating recorder**), the **Floating recorder**
+  button, or by restoring and minimizing the main window again.
+- **Closing the window (X), tray Quit:** exits the app. No popup is shown. If a
+  recording is running you are asked to **Stop & Quit**; the worker then finishes
+  saving and AI processing in the background.
 
 The main window shows saved sessions, the original transcript, meeting notes,
 audio-device choices, an optional microphone, and a save-audio-only mode.
@@ -67,7 +67,8 @@ or an IT-approved distribution route is needed where Application Control rejects
 unsigned executables. To validate hardware without AI, run
 `uv run python tests/check_muted_capture.py`. It temporarily sets zero/mute and
 restores both original settings in `finally`. Automated tests use mocked audio/AI
-and also verify pause exclusion and mini recorder controls.
+and also verify pause exclusion, the floating recorder, and close/quit behaviour.
+`uv run python tests/render_desktop.py OUTDIR` renders PNGs of the window and popup.
 
 The CLI and storage pipeline from the original project are retained below.
 

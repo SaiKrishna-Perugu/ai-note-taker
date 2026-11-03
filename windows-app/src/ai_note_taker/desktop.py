@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 from dotenv import dotenv_values
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSettings, QStandardPaths, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QSettings, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from ai_note_taker.ai import DEFAULT_MODEL
 from ai_note_taker.audio import devices
 from ai_note_taker.desktop_controller import DesktopController
+from ai_note_taker.popup import CapsuleRecorder
 
 ACTIVE = {"starting", "recording", "paused", "processing"}
 _fonts_loaded = False
@@ -38,7 +39,8 @@ def load_fonts() -> None:
 
 STYLE = """
 QWidget { color: #292724; font-family: 'Segoe UI'; font-size: 13px; }
-QMainWindow, #canvas { background: #faf9f6; }
+QMainWindow, #canvas, QMessageBox, QDialog { background: #faf9f6; }
+QMessageBox QLabel { color: #292724; }
 #sidebar { background: #eeede8; border-right: 1px solid #deddd7; }
 #settings { background: #f3f2ee; border: 1px solid #e4e2db; border-radius: 14px; }
 #card { background: white; border: 1px solid #e4e2db; border-radius: 14px; }
@@ -127,192 +129,6 @@ class Waveform(QWidget):
         painter.end()
 
 
-class RecorderBubble(QPushButton):
-    """Circular recorder handle; dragging must never activate its click action."""
-
-    def __init__(self, mini: "MiniRecorder") -> None:
-        super().__init__(mini)
-        self.mini = mini
-        self.setFixedSize(76, 76)
-        self.setAccessibleName("Open recorder controls")
-        self.setToolTip("Click for recording controls. Drag to move. Right-click for more.")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clicked.connect(mini.show_controls)
-        self.press_position: QPoint | None = None
-        self.window_position = QPoint()
-        self.dragged = False
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#d5cfc4"), 1))
-        painter.setBrush(QColor("#292724" if not self.isDown() else "#474039"))
-        painter.drawEllipse(QRectF(3, 3, 69, 69))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#fff8ec"))
-        for x, height in ((22, 14), (30, 28), (38, 36), (46, 21)):
-            painter.drawRoundedRect(x, (76-height)//2, 4, height, 2, 2)
-        state = self.mini.owner.status
-        color = "#e77f58" if state == "recording" else "#e5be70" if state == "paused" else "#a8a294"
-        painter.setPen(QPen(QColor("#f8f5ef"), 2))
-        painter.setBrush(QColor(color))
-        painter.drawEllipse(QRectF(54, 54, 14, 14))
-        painter.end()
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.press_position = event.globalPosition().toPoint()
-            self.window_position = self.mini.pos()
-            self.dragged = False
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if self.press_position is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            delta = event.globalPosition().toPoint() - self.press_position
-            if delta.manhattanLength() >= QApplication.startDragDistance():
-                self.dragged = True
-            if self.dragged:
-                self.mini.move_clamped(self.window_position + delta)
-                return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        self.press_position = None
-        if self.dragged:
-            self.setDown(False)
-            self.mini.save_position()
-            self.dragged = False
-            return
-        super().mouseReleaseEvent(event)
-
-
-class MiniRecorder(QWidget):
-    def __init__(self, owner: "MainWindow") -> None:
-        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
-                         Qt.WindowType.WindowStaysOnTopHint)
-        self.owner = owner
-        self.setWindowTitle("AI Note Taker · Mini recorder")
-        self.setObjectName("mini")
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setStyleSheet(STYLE + "#mini { background: transparent; } "
-                          "#miniPanel { background: #f8f5ef; border: 1px solid #d7d0c3; border-radius: 18px; }")
-        self.expanded = False
-        self.drag_offset: QPoint | None = None
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        self.bubble = RecorderBubble(self)
-        outer.addWidget(self.bubble, 0, Qt.AlignmentFlag.AlignCenter)
-        self.bubble_minimize = button("−", owner.minimize_popup)
-        self.bubble_minimize.setParent(self)
-        self.bubble_minimize.setAccessibleName("Minimize recorder bubble")
-        self.bubble_minimize.setToolTip("Minimize popup. Restore the app from the taskbar.")
-        self.bubble_minimize.setFixedSize(22, 22)
-        self.bubble_minimize.move(57, 0)
-        self.bubble_minimize.setStyleSheet("padding: 0; background: #f8f5ef; border: 1px solid #d7d0c3; border-radius: 11px; font-size: 17px;")
-        self.panel = QFrame()
-        self.panel.setObjectName("miniPanel")
-        outer.addWidget(self.panel)
-        layout = QVBoxLayout(self.panel)
-        layout.setContentsMargins(13, 11, 13, 12)
-        layout.setSpacing(7)
-        top = QHBoxLayout()
-        top.addWidget(label("NOTE TAKER", "eyebrow"))
-        top.addStretch()
-        self.minimize_button = button("−", owner.minimize_popup)
-        self.minimize_button.setAccessibleName("Minimize popup")
-        self.minimize_button.setToolTip("Hide popup; keep the app in the taskbar.")
-        self.minimize_button.setFixedSize(27, 25)
-        self.minimize_button.setStyleSheet("padding: 0; border: none; font-size: 22px;")
-        top.addWidget(self.minimize_button)
-        self.close_button = button("×", self.close)
-        self.close_button.setAccessibleName("Close mini recorder")
-        self.close_button.setToolTip("Close popup; recording continues. Restore from the taskbar or tray.")
-        self.close_button.setFixedSize(27, 25)
-        self.close_button.setStyleSheet("padding: 0; border: none; font-size: 22px;")
-        top.addWidget(self.close_button)
-        layout.addLayout(top)
-        self.status = label("Ready", "eyebrow", True)
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.status)
-        self.time = label("00:00", "brand")
-        self.time.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.time.setStyleSheet("font-size: 27px; font-weight: 650; padding: 5px 0;")
-        layout.addWidget(self.time)
-        self.toggle = button("Record", owner.mini_toggle, True)
-        self.stop = button("Stop", owner.stop)
-        layout.addWidget(self.toggle)
-        layout.addWidget(self.stop)
-        self.expand = button("Open full app", owner.restore)
-        self.expand.setAccessibleName("Expand recorder")
-        layout.addWidget(self.expand)
-        self.collapse_button = button("Collapse to circle", self.collapse)
-        self.collapse_button.setStyleSheet("padding: 5px; border: none; color: #817d75; background: transparent;")
-        layout.addWidget(self.collapse_button)
-        self.quit_button = button("Quit app", owner.quit_app)
-        self.quit_button.setToolTip("Stop recording, finish saving, and exit the app.")
-        self.quit_button.setStyleSheet("padding: 5px; border: none; color: #817d75; background: transparent;")
-        layout.addWidget(self.quit_button)
-        self.collapse()
-
-    def change_mode(self, expanded: bool) -> None:
-        old_right = self.x() + self.width()
-        visible = self.isVisible()
-        self.expanded = expanded
-        self.bubble.setVisible(not expanded)
-        self.bubble_minimize.setVisible(not expanded)
-        self.panel.setVisible(expanded)
-        self.setFixedSize(216, 338) if expanded else self.setFixedSize(80, 80)
-        self.bubble_minimize.raise_()
-        if visible:
-            self.move_clamped(QPoint(old_right - self.width(), self.y()))
-
-    def show_controls(self) -> None:
-        self.change_mode(True)
-
-    def collapse(self) -> None:
-        self.change_mode(False)
-
-    def move_clamped(self, point: QPoint) -> None:
-        screen = QApplication.screenAt(point) or self.screen() or QApplication.primaryScreen()
-        area = screen.availableGeometry()
-        self.move(max(area.left(), min(point.x(), area.right() - self.width() + 1)),
-                  max(area.top(), min(point.y(), area.bottom() - self.height() + 1)))
-
-    def save_position(self) -> None:
-        # Remember the circle's anchor even when the larger panel was dragged.
-        point = QPoint(self.x() + self.width() - 80, self.y())
-        self.owner.preferences.setValue("mini_position", point)
-
-    def contextMenuEvent(self, event) -> None:
-        menu = QMenu(self)
-        for title, callback in (("Recording controls", self.show_controls),
-                                ("Collapse to circle", self.collapse),
-                                ("Minimize popup", self.owner.minimize_popup),
-                                ("Open full app", self.owner.restore),
-                                ("Quit app", self.owner.quit_app)):
-            menu.addAction(title, callback)
-        menu.exec(event.globalPos())
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self.drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            point = event.globalPosition().toPoint() - self.drag_offset
-            self.move_clamped(point)
-
-    def mouseReleaseEvent(self, event) -> None:
-        self.drag_offset = None
-        self.save_position()
-
-    def closeEvent(self, event) -> None:
-        event.accept()
-        self.owner.popup_dismissed = True
-
-
 class MainWindow(QMainWindow):
     def __init__(self, output: Path, env_file: Path | None = None) -> None:
         super().__init__()
@@ -364,7 +180,7 @@ class MainWindow(QMainWindow):
         heading.addWidget(label("MEETING WORKSPACE", "eyebrow"))
         heading.addWidget(label("Catch every detail.", "heading"))
         header.addLayout(heading, 1)
-        header.addWidget(button("Mini recorder  ↗", self.show_mini))
+        header.addWidget(button("Floating recorder  ↗", lambda: self.show_popup(force=True)))
         body.addLayout(header)
         self.message = label("Record your meeting. Get a transcript and useful notes.", "muted", True)
         body.addWidget(self.message)
@@ -461,12 +277,12 @@ class MainWindow(QMainWindow):
         body.addWidget(self.footer)
         outer.addLayout(body, 1)
 
-        self.mini = MiniRecorder(self)
+        self.popup = CapsuleRecorder(self.record, self.toggle_pause, self.stop, self.dismiss_popup, self.preferences)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         menu = QMenu()
-        for title, action in (("Open Note Taker", self.restore), ("Mini recorder", self.show_mini),
+        for title, action in (("Open Note Taker", self.restore), ("Show floating recorder", lambda: self.show_popup(force=True)),
                               ("Pause / Resume", self.toggle_pause), ("Stop recording", self.stop),
-                              ("Quit", self.quit_app)):
+                              ("Quit", self.request_quit)):
             item = QAction(title, self)
             item.triggered.connect(action)
             menu.addAction(item)
@@ -501,6 +317,8 @@ class MainWindow(QMainWindow):
         self.config_label.setToolTip(str(self.env_file or "Uses environment variables"))
 
     def load_devices(self) -> None:
+        if self.quitting:
+            return
         try:
             for device in devices():
                 combo = self.system if device["loopback"] else self.mic
@@ -550,12 +368,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.message.setText(str(exc))
 
-    def mini_toggle(self) -> None:
-        if self.status in ("recording", "paused"):
-            self.toggle_pause()
-        elif self.status not in ACTIVE:
-            self.record()
-
     def toggle_pause(self) -> None:
         if self.status == "recording":
             self.controller.pause()
@@ -567,61 +379,80 @@ class MainWindow(QMainWindow):
         if self.status in ("recording", "paused", "starting"):
             self.message.setText("Stopping capture and finishing your transcript…")
             self.stop_button.setEnabled(False)
-            self.mini.stop.setEnabled(False)
+            self.popup.mark_stopping()
 
-    def show_mini(self) -> None:
-        self.popup_dismissed = False
-        if not self.isMinimized():
-            self.showMinimized()
-        self.show_mini_if_minimized()
-
-    def show_mini_if_minimized(self) -> None:
-        if not self.isMinimized() or self.popup_dismissed or self.quitting:
+    def show_popup(self, force: bool = False) -> None:
+        if self.quitting:
             return
-        if not self.mini.isVisible():
-            self.mini.collapse()
-            screen = self.screen() or QApplication.primaryScreen()
-            rect = screen.availableGeometry()
-            saved = self.preferences.value("mini_position")
-            position = saved if isinstance(saved, QPoint) else QPoint(
-                rect.right() - self.mini.width() - 22, rect.top() + rect.height() // 3)
-            self.mini.move(max(rect.left(), min(position.x(), rect.right() - self.mini.width() + 1)),
-                           max(rect.top(), min(position.y(), rect.bottom() - self.mini.height() + 1)))
-        self.mini.show()
+        if force:
+            self.popup_dismissed = False
+            if not self.isMinimized():
+                self.showMinimized()
+        if self.isMinimized() and not self.popup_dismissed:
+            if not self.popup.isVisible():
+                self.popup.place(self.screen() or QApplication.primaryScreen())
+            self.popup.show()
 
-    def minimize_popup(self) -> None:
+    def dismiss_popup(self) -> None:
         self.popup_dismissed = True
-        self.mini.hide()
+        self.popup.hide()
 
     def restore(self) -> None:
-        self.mini.hide()
+        self.popup.hide()
         self.showNormal()
         self.raise_()
         self.activateWindow()
 
     def changeEvent(self, event) -> None:
-        if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "mini"):
+        if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "popup"):
             was_minimized = bool(event.oldState() & Qt.WindowState.WindowMinimized)
             if self.isMinimized() and not was_minimized:
                 self.popup_dismissed = False
-                self.show_mini_if_minimized()
+                self.show_popup()
             elif not self.isMinimized():
-                self.mini.hide()
+                self.popup.hide()
         super().changeEvent(event)
+
+    def confirm_quit(self) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("AI Note Taker")
+        box.setText("Stop recording and quit?")
+        box.setInformativeText("Closing AI Note Taker will stop the recording. Your audio is saved and the "
+                               "transcript and notes finish in the background.")
+        quit_button = box.addButton("Stop && Quit", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is quit_button
+
+    def request_quit(self) -> bool:
+        if self.status in ("starting", "recording", "paused"):
+            if not self.confirm_quit():
+                return False
+            try:
+                current = self.controller.snapshot()["status"]
+            except (OSError, ValueError, KeyError):
+                current = self.status
+            if current in ("starting", "recording", "paused"):
+                self.controller.stop()
+        self.quit_app()
+        return True
 
     def closeEvent(self, event) -> None:
         if self.quitting:
             event.accept()
-        else:
-            event.ignore()
-            self.show_mini()
+            return
+        event.ignore()
+        self.request_quit()
 
     def quit_app(self) -> None:
         self.quitting = True
-        self.controller.stop()
+        self.timer.stop()
         # The hidden worker finishes saving/AI requests even after the UI exits.
+        self.controller.stop()
+        self.popup.dispose()
         self.tray.hide()
-        self.mini.hide()
         QApplication.quit()
 
     def open_recordings(self) -> None:
@@ -658,6 +489,8 @@ class MainWindow(QMainWindow):
                 scroll.setValue(scroll.maximum() if at_bottom else old)
 
     def refresh(self) -> None:
+        if self.quitting:
+            return
         try:
             state = self.controller.snapshot()
         except (OSError, ValueError):
@@ -698,13 +531,7 @@ class MainWindow(QMainWindow):
         self.waveform.level = max(state.get("levels", {}).values(), default=0) if self.status == "recording" else 0
         self.waveform.phase += 1
         self.waveform.update()
-        self.mini.status.setText(f"{'●' if self.status == 'recording' else '◦'}  {title}")
-        self.mini.time.setText(clock)
-        self.mini.toggle.setText("Resume" if self.status == "paused" else "Pause" if self.status == "recording" else "Record")
-        self.mini.toggle.setEnabled(self.status in ("recording", "paused") or not busy)
-        self.mini.stop.setEnabled(self.stop_button.isEnabled())
-        self.mini.bubble.setToolTip(f"{title} · {clock}\nClick for controls. Drag to move.")
-        self.mini.bubble.update()
+        self.popup.update_state(self.status, clock)
         self.tray.setToolTip(f"AI Note Taker · {title} · {clock}")
         sessions = self.controller.sessions()
         ids = [str(path) for path in sessions]

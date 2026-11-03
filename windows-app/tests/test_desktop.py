@@ -9,8 +9,7 @@ from unittest.mock import Mock, patch
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QWindowStateChangeEvent
+from shiboken6 import isValid
 
 from ai_note_taker.audio import Capture
 from ai_note_taker.desktop import MainWindow
@@ -94,18 +93,42 @@ class DesktopTests(unittest.TestCase):
         self.controller.sessions.return_value = []
         self.controller.transcript.return_value = ""
         self.controller.notes.return_value = ""
-        with patch("ai_note_taker.desktop.DesktopController", return_value=self.controller):
-            self.window = MainWindow(Path(self.temp.name))
-        self.window.timer.stop()
+        self.window = self.make_window()
         self.addCleanup(self.dispose)
+
+    def make_window(self):
+        with patch("ai_note_taker.desktop.DesktopController", return_value=self.controller):
+            window = MainWindow(Path(self.temp.name))
+        window.timer.stop()
+        return window
 
     def dispose(self):
         self.window.quitting = True
-        self.window.mini.hide()
+        self.window.timer.stop()
+        if isValid(self.window.popup):
+            self.window.popup.dispose()
         self.window.tray.hide()
         self.window.close()
         self.window.deleteLater()
         QApplication.processEvents()
+
+    def close_window(self):
+        with patch("ai_note_taker.desktop.QApplication.quit") as quit_app:
+            self.window.close()
+        return quit_app
+
+    def test_dialogs_use_the_light_app_background(self):
+        # Regression: on Windows dark mode the quit prompt text (#292724) was unreadable
+        # because only the text colour came from the app stylesheet, not the background.
+        from PySide6.QtWidgets import QMessageBox
+
+        box = QMessageBox(self.window)
+        box.setText("Stop recording and quit?")
+        box.show()
+        QApplication.processEvents()
+        self.addCleanup(box.close)
+        pixel = box.grab().toImage().pixelColor(3, 3)
+        self.assertEqual(pixel.name(), "#faf9f6")
 
     def test_idle_and_active_buttons_match_state(self):
         self.assertTrue(self.window.record_button.isEnabled())
@@ -120,99 +143,127 @@ class DesktopTests(unittest.TestCase):
         self.controller.snapshot.return_value = {"status": "paused", "active_seconds": 65}
         self.window.refresh()
         self.assertIn("Resume", self.window.pause_button.text())
-        self.window.mini.toggle.click()
+        self.window.popup.pause_button.click()
         self.controller.resume.assert_called_once()
 
-    def test_minimizing_shows_mini_and_expand_restores_window(self):
-        self.window.show()
-        self.window.showMinimized()
-        QApplication.processEvents()
-        self.assertTrue(self.window.mini.isVisible())
-        self.assertTrue(self.window.isVisible())
-        self.assertTrue(self.window.isMinimized())
-        # Simulate restoring from the taskbar, without the app's restore helper.
-        self.window.showNormal()
-        QApplication.processEvents()
-        self.assertTrue(self.window.isVisible())
-        self.assertFalse(self.window.mini.isVisible())
-
-    def test_mini_is_circular_and_opens_stacked_controls(self):
-        self.window.show_mini()
-        QApplication.processEvents()
-        mini = self.window.mini
-        self.assertEqual(mini.height(), mini.width())
-        self.assertTrue(mini.bubble.isVisible())
-        self.assertFalse(mini.panel.isVisible())
-        mini.bubble.click()
-        QApplication.processEvents()
-        self.assertGreater(mini.height(), mini.width())
-        self.assertTrue(mini.panel.isVisible())
-        self.assertGreater(mini.stop.y(), mini.toggle.y())
-        self.assertGreater(mini.expand.y(), mini.stop.y())
-        mini.collapse_button.click()
-        self.assertEqual(mini.size().width(), 80)
-        self.assertTrue(mini.bubble.isVisible())
-
-    def test_mini_close_hides_popup_without_stopping_or_reopening(self):
-        self.window.show_mini()
-        self.window.mini.show_controls()
-        with patch.object(self.window.tray, "isVisible", return_value=True):
-            self.window.mini.close_button.click()
-        self.assertFalse(self.window.mini.isVisible())
-        self.assertTrue(self.window.isVisible())
-        self.assertTrue(self.window.isMinimized())
-        self.controller.stop.assert_not_called()
-        self.window.refresh()
-        QApplication.processEvents()
-        self.assertFalse(self.window.mini.isVisible())
-        self.window.restore()
-        self.assertTrue(self.window.isVisible())
-
-    def test_bubble_can_be_minimized_without_losing_taskbar_window(self):
-        self.window.show_mini()
-        self.window.mini.bubble_minimize.click()
-        QApplication.processEvents()
-        self.assertFalse(self.window.mini.isVisible())
-        self.assertTrue(self.window.isVisible())
-        self.assertTrue(self.window.isMinimized())
-        self.controller.stop.assert_not_called()
-        self.window.refresh()
-        QApplication.processEvents()
-        self.assertFalse(self.window.mini.isVisible())
-        self.window.showNormal()
-        self.window.showMinimized()
-        QApplication.processEvents()
-        self.assertTrue(self.window.mini.bubble.isVisible())
-
-    def test_expanded_popup_has_its_own_minimize(self):
-        self.window.show_mini()
-        self.window.mini.bubble.click()
-        self.window.mini.minimize_button.click()
-        QApplication.processEvents()
-        self.assertFalse(self.window.mini.isVisible())
-        self.assertTrue(self.window.isMinimized())
-
-    def test_quick_minimize_restore_does_not_leave_stray_bubble(self):
-        self.window.show()
-        self.window.showMinimized()
-        self.window.showNormal()
-        QApplication.processEvents()
-        self.assertFalse(self.window.mini.isVisible())
-
-    def test_state_change_while_already_minimized_keeps_popup_dismissed(self):
-        self.window.show_mini()
-        self.window.minimize_popup()
-        self.window.changeEvent(QWindowStateChangeEvent(Qt.WindowState.WindowMinimized))
-        self.assertFalse(self.window.mini.isVisible())
-
-    def test_mini_quit_stops_recording_and_exits(self):
-        self.window.show_mini()
-        self.window.mini.show_controls()
-        with patch("ai_note_taker.desktop.QApplication.quit") as quit_app:
-            self.window.mini.quit_button.click()
-        self.controller.stop.assert_called_once()
+    def test_close_when_idle_quits_without_showing_popup(self):
+        quit_app = self.close_window()
         quit_app.assert_called_once()
-        self.assertFalse(self.window.mini.isVisible())
+        self.assertTrue(self.window.quitting)
+        self.assertFalse(self.window.popup.isVisible())
+        self.assertFalse(self.window.tray.isVisible())
+
+    def test_close_never_shows_popup(self):
+        self.window.show()
+        QApplication.processEvents()
+        self.close_window()
+        self.assertFalse(self.window.popup.isVisible())
+
+    def test_close_while_recording_respects_confirmation(self):
+        self.controller.snapshot.return_value = {"status": "recording", "active_seconds": 3}
+        self.window.refresh()
+        with patch.object(self.window, "confirm_quit", return_value=False) as confirm:
+            quit_app = self.close_window()
+        confirm.assert_called_once()
+        self.controller.stop.assert_not_called()
+        quit_app.assert_not_called()
+        self.assertFalse(self.window.quitting)
+        with patch.object(self.window, "confirm_quit", return_value=True):
+            quit_app = self.close_window()
+        self.controller.stop.assert_called()
+        quit_app.assert_called_once()
+        self.assertTrue(self.window.quitting)
+
+    def test_close_while_processing_quits_without_prompt(self):
+        self.controller.snapshot.return_value = {"status": "processing"}
+        self.window.refresh()
+        with patch.object(self.window, "confirm_quit") as confirm:
+            quit_app = self.close_window()
+        confirm.assert_not_called()
+        quit_app.assert_called_once()
+        self.assertTrue(self.window.quitting)
+
+    def test_quit_guards_refresh_and_popup(self):
+        with patch("ai_note_taker.desktop.QApplication.quit"):
+            self.window.quit_app()
+        self.assertFalse(self.window.timer.isActive())
+        self.controller.snapshot.reset_mock()
+        self.window.refresh()
+        self.controller.snapshot.assert_not_called()
+        self.window.show_popup(force=True)
+        self.assertFalse(self.window.popup.isVisible())
+
+    def test_minimizing_shows_popup_and_restore_hides_it(self):
+        self.window.show()
+        self.window.showMinimized()
+        QApplication.processEvents()
+        self.assertTrue(self.window.isMinimized())
+        self.assertTrue(self.window.popup.isVisible())
+        self.window.restore()
+        QApplication.processEvents()
+        self.assertFalse(self.window.popup.isVisible())
+        self.assertFalse(self.window.isMinimized())
+
+    def test_popup_close_dismisses_without_stopping(self):
+        self.window.show()
+        self.window.showMinimized()
+        QApplication.processEvents()
+        self.assertTrue(self.window.popup.isVisible())
+        self.window.popup.close_button.click()
+        QApplication.processEvents()
+        self.assertFalse(self.window.popup.isVisible())
+        self.assertTrue(self.window.popup_dismissed)
+        self.controller.stop.assert_not_called()
+        self.assertFalse(self.window.quitting)
+        self.assertTrue(self.window.isVisible())
+        self.window.refresh()
+        QApplication.processEvents()
+        self.assertFalse(self.window.popup.isVisible())
+        self.window.show_popup(force=True)
+        QApplication.processEvents()
+        self.assertTrue(self.window.popup.isVisible())
+        self.assertFalse(self.window.popup_dismissed)
+        self.window.popup.close_button.click()
+        self.window.restore()
+        self.window.showMinimized()
+        QApplication.processEvents()
+        self.assertTrue(self.window.popup.isVisible())
+
+    def test_refresh_forwards_state_to_popup(self):
+        for status, start, pause, stop in (("recording", False, True, True), ("paused", False, True, True),
+                                           ("idle", True, False, False)):
+            self.controller.snapshot.return_value = {"status": status, "active_seconds": 75}
+            self.window.refresh()
+            popup = self.window.popup
+            self.assertEqual(popup.status, self.window.status)
+            self.assertEqual(popup.time_label.text(), self.window.clock.text())
+            self.assertEqual(popup.time_label.text(), "01:15")
+            self.assertEqual(popup.start_button.isEnabled(), start)
+            self.assertEqual(popup.pause_button.isEnabled(), pause)
+            self.assertEqual(popup.stop_button.isEnabled(), stop)
+
+    def test_popup_buttons_invoke_window_actions(self):
+        self.dispose()
+        with patch.object(MainWindow, "record") as record, patch.object(MainWindow, "toggle_pause") as pause, \
+                patch.object(MainWindow, "stop") as stop:
+            self.window = self.make_window()
+            self.window.popup.start_button.click()
+            record.assert_called_once()
+            self.controller.snapshot.return_value = {"status": "recording", "active_seconds": 1}
+            self.window.refresh()
+            self.window.popup.pause_button.click()
+            pause.assert_called_once()
+            self.window.popup.stop_button.click()
+            stop.assert_called_once()
+
+    def test_tray_menu_actions(self):
+        actions = {a.text(): a for a in self.window.tray.contextMenu().actions()}
+        self.assertIn("Show floating recorder", actions)
+        self.assertIn("Quit", actions)
+        with patch("ai_note_taker.desktop.QApplication.quit") as quit_app:
+            actions["Quit"].trigger()
+        quit_app.assert_called_once()
+        self.assertTrue(self.window.quitting)
 
     def test_record_and_stop_controls_send_configuration(self):
         self.window.offline.setChecked(True)
