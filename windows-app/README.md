@@ -18,6 +18,11 @@ or **Choose .env file…** in the AI configuration panel. The chip on the record
 shows what you will get: **AI TRANSCRIPT ON**, **AUDIO ONLY · NO TRANSCRIPT** ("Save audio only"
 is ticked) or **AI KEY NEEDED**.
 
+**Dark mode.** Pick **Appearance** at the top of the settings panel: **Match Windows** (the default; it
+follows your Windows light/dark setting live, even while the app is open), **Light** or **Dark**. The
+choice is remembered, and it also styles the title bar, dialogs, tray menu and the floating recorder.
+All colours live in `src/ai_note_taker/theme.py`; a test guards the text contrast of both themes.
+
 **No transcript for a recording?** An amber bar above the recorder says why and offers one
 button: **Transcribe now** (for audio saved without AI), **Retry transcription** (when the AI
 request failed, e.g. a bad key or no internet) or **Retry notes**. Select any past recording in

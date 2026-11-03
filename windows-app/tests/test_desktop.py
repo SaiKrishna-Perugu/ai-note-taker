@@ -101,6 +101,7 @@ class DesktopTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop("GEMINI_API_KEY", None)
+        QSettings("AI Note Taker", "Desktop").clear()        # no preferences leaking between tests
         self.env_path = Path(self.temp.name) / "test.env"
         self.env_path.write_text("GEMINI_API_KEY=test-key\n", encoding="utf-8")
         self.controller = Mock()
@@ -348,18 +349,100 @@ class DesktopTests(unittest.TestCase):
         self.window.refresh()
         self.assertTrue(self.window.notice.isHidden())
 
+    # --- dark mode ---------------------------------------------------------------------------
+
+    def pick_theme(self, preference: str) -> None:
+        self.window.theme_box.setCurrentIndex(self.window.theme_box.findData(preference))
+
+    def test_theme_defaults_to_matching_windows(self):
+        from ai_note_taker.theme import PREFERENCE_LABELS
+
+        self.assertEqual(self.window.theme_preference, "system")
+        self.assertEqual(self.window.theme_box.currentText(), PREFERENCE_LABELS["system"])
+        self.assertEqual(self.window.theme_box.count(), 3)
+
+    def test_choosing_dark_restyles_the_window_pill_waveform_and_tray_menu(self):
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.pick_theme("dark")
+        self.assertEqual(self.window.theme_name, "dark")
+        self.assertIn(theme.DARK["bg"], self.window.styleSheet())
+        self.assertIn(theme.DARK["bg"], self.window.tray_menu.styleSheet())
+        self.assertEqual(self.window.popup.theme, "dark")
+        self.assertEqual(self.window.waveform.active_color.name(), theme.DARK["wave_active"])
+        self.assertEqual(self.window.preferences.value("theme"), "dark")
+        self.pick_theme("light")
+        self.assertEqual(self.window.theme_name, "light")
+        self.assertIn(theme.LIGHT["bg"], self.window.styleSheet())
+        self.assertEqual(self.window.popup.theme, "light")
+
+    def test_the_theme_choice_is_remembered_across_launches(self):
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.pick_theme("dark")
+        second = self.make_window()
+        self.addCleanup(lambda: (second.popup.dispose() if isValid(second.popup) else None,
+                                 second.tray.hide(), second.deleteLater()))
+        self.assertEqual(second.theme_preference, "dark")
+        self.assertEqual(second.theme_box.currentData(), "dark")
+        self.assertIn(theme.DARK["bg"], second.styleSheet())
+
+    def test_match_windows_follows_the_system_live_but_an_explicit_choice_does_not(self):
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        with patch("ai_note_taker.theme.system_is_dark", return_value=True):
+            self.pick_theme("system")
+            self.window.on_color_scheme_changed()
+            self.assertEqual(self.window.theme_name, "dark")
+        with patch("ai_note_taker.theme.system_is_dark", return_value=False):
+            self.window.on_color_scheme_changed()                 # Windows switched to light
+            self.assertEqual(self.window.theme_name, "light")
+            self.assertEqual(self.window.popup.theme, "light")
+        self.pick_theme("dark")
+        with patch("ai_note_taker.theme.system_is_dark", return_value=False):
+            self.window.on_color_scheme_changed()
+            self.assertEqual(self.window.theme_name, "dark")      # explicit choice wins
+
+    def test_unknown_saved_theme_falls_back_to_matching_windows(self):
+        self.window.preferences.setValue("theme", "purple")
+        broken = self.make_window()
+        self.addCleanup(lambda: (broken.popup.dispose() if isValid(broken.popup) else None,
+                                 broken.tray.hide(), broken.deleteLater()))
+        self.assertEqual(broken.theme_preference, "system")
+
+    def test_dark_dialogs_are_dark_and_stay_readable(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.pick_theme("dark")
+        box = QMessageBox(self.window)
+        box.setText("Stop recording and quit?")
+        box.show()
+        QApplication.processEvents()
+        self.addCleanup(box.close)
+        self.assertEqual(box.grab().toImage().pixelColor(3, 3).name(), theme.DARK["bg"])
+
     def test_dialogs_use_the_light_app_background(self):
         # Regression: on Windows dark mode the quit prompt text (#292724) was unreadable
         # because only the text colour came from the app stylesheet, not the background.
         from PySide6.QtWidgets import QMessageBox
 
+        from ai_note_taker import theme
+
+        self.addCleanup(theme.apply_color_scheme, "system")
+        self.window.theme_box.setCurrentIndex(self.window.theme_box.findData("light"))
         box = QMessageBox(self.window)
         box.setText("Stop recording and quit?")
         box.show()
         QApplication.processEvents()
         self.addCleanup(box.close)
         pixel = box.grab().toImage().pixelColor(3, 3)
-        self.assertEqual(pixel.name(), "#faf9f6")
+        self.assertEqual(pixel.name(), theme.LIGHT["bg"])
 
     def test_idle_and_active_buttons_match_state(self):
         self.assertTrue(self.window.record_button.isEnabled())

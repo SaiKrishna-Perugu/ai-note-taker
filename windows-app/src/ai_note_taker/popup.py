@@ -3,16 +3,10 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSettings, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeyEvent, QPainter, QPainterPath, QPen, QScreen
+from PySide6.QtGui import QFont, QGuiApplication, QKeyEvent, QPainter, QPainterPath, QPen, QScreen
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QToolButton, QVBoxLayout, QWidget
 
-CREAM = QColor("#f8f5ef")
-INK = QColor("#292724")
-ACCENT = QColor("#be5b3d")
-BORDER = QColor("#d7d0c3")
-RECORD_RED = QColor("#d9382c")
-HOVER = QColor("#ece6dc")
-PRESSED = QColor("#e2dacb")
+from ai_note_taker.theme import capsule_colors
 
 SHADOW_MARGIN = 10
 CAPSULE_SIZE = QSize(56, 236)
@@ -26,6 +20,7 @@ class CapsuleButton(QToolButton):
 
     def __init__(self, kind: str, size: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.colors = capsule_colors("light")        # replaced by CapsuleRecorder.set_theme
         self.setProperty("kind", kind)
         self.setProperty("mode", "pause")
         self.setFixedSize(size, size)
@@ -41,13 +36,13 @@ class CapsuleButton(QToolButton):
         circle = bounds.adjusted(1, 1, -1, -1)
         painter.setPen(Qt.PenStyle.NoPen)
         if enabled and self.isDown():
-            painter.setBrush(PRESSED)
+            painter.setBrush(self.colors["pressed"])
             painter.drawEllipse(circle)
         elif enabled and self.underMouse():
-            painter.setBrush(HOVER)
+            painter.setBrush(self.colors["hover"])
             painter.drawEllipse(circle)
         if self.hasFocus() and self.focusPolicy() != Qt.FocusPolicy.NoFocus:
-            ring = QPen(ACCENT, 1.5)
+            ring = QPen(self.colors["accent"], 1.5)
             painter.setPen(ring)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(circle.adjusted(0.75, 0.75, -0.75, -0.75))
@@ -60,9 +55,10 @@ class CapsuleButton(QToolButton):
         centre = bounds.center()
         unit = min(bounds.width(), bounds.height())
         painter.setPen(Qt.PenStyle.NoPen)
+        ink = self.colors["ink"]
         if kind == "start":
             radius = unit * 0.2
-            painter.setBrush(RECORD_RED)
+            painter.setBrush(self.colors["record"])
             painter.drawEllipse(centre, radius, radius)
         elif kind == "pause" and self.property("mode") == "resume":
             half = unit * 0.2
@@ -71,21 +67,21 @@ class CapsuleButton(QToolButton):
             path.lineTo(centre.x() + half * 1.2, centre.y())
             path.lineTo(centre.x() - half * 0.7, centre.y() + half * 1.15)
             path.closeSubpath()
-            painter.setBrush(INK)
+            painter.setBrush(ink)
             painter.drawPath(path)
         elif kind == "pause":
             bar_w, bar_h, gap = unit * 0.12, unit * 0.38, unit * 0.1
-            painter.setBrush(INK)
+            painter.setBrush(ink)
             for sign in (-1, 1):
                 x = centre.x() + sign * (gap / 2 + bar_w / 2) - bar_w / 2
                 painter.drawRoundedRect(QRectF(x, centre.y() - bar_h / 2, bar_w, bar_h), 1.5, 1.5)
         elif kind == "stop":
             side = unit * 0.34
-            painter.setBrush(INK)
+            painter.setBrush(ink)
             painter.drawRoundedRect(QRectF(centre.x() - side / 2, centre.y() - side / 2, side, side), 3, 3)
         elif kind == "close":
             reach = unit * 0.17
-            pen = QPen(INK, 1.4)
+            pen = QPen(ink, 1.4)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.drawLine(QPointF(centre.x() - reach, centre.y() - reach), QPointF(centre.x() + reach, centre.y() + reach))
@@ -157,9 +153,9 @@ class CapsuleRecorder(QWidget):
         self.stop_button.setToolTip("Stop recording")
 
         divider = QFrame()
+        self.divider = divider
         divider.setObjectName("capsuleDivider")
         divider.setFixedSize(26, 1)
-        divider.setStyleSheet("#capsuleDivider { background: #e4ded2; border: none; }")
 
         self.time_label = QLabel("00:00")
         self.time_label.setObjectName("capsuleTime")
@@ -171,7 +167,6 @@ class CapsuleRecorder(QWidget):
         font.setPixelSize(11)
         font.setWeight(QFont.Weight.DemiBold)
         self.time_label.setFont(font)
-        self.time_label.setStyleSheet("color: #292724; background: transparent;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SHADOW_MARGIN, SHADOW_MARGIN + 8, SHADOW_MARGIN, SHADOW_MARGIN + 10)
@@ -199,7 +194,23 @@ class CapsuleRecorder(QWidget):
         if app is not None:
             app.screenRemoved.connect(self._reclamp)
 
+        self.theme = "light"
+        self.colors = capsule_colors("light")
+        self.set_theme("light")
         self.update_state("idle", "00:00")
+
+    # --- theme -----------------------------------------------------------------
+
+    def set_theme(self, theme: str) -> None:
+        """Repaint the pill with the light or dark palette."""
+        self.theme = "dark" if theme == "dark" else "light"
+        self.colors = capsule_colors(self.theme)
+        for button in (self.close_button, self.start_button, self.pause_button, self.stop_button):
+            button.colors = self.colors
+            button.update()
+        self.divider.setStyleSheet(f"#capsuleDivider {{ background: {self.colors['divider'].name()}; border: none; }}")
+        self.time_label.setStyleSheet(f"color: {self.colors['ink'].name()}; background: transparent;")
+        self.update()
 
     # --- state -----------------------------------------------------------------
 
@@ -311,11 +322,10 @@ class CapsuleRecorder(QWidget):
         for i in range(steps, 0, -1):
             grow = float(i)
             ring = body.adjusted(-grow, -grow, grow, grow).translated(0, 2)
-            colour = QColor(41, 39, 36, 11)
-            painter.setBrush(colour)
+            painter.setBrush(self.colors["shadow"])
             painter.drawRoundedRect(ring, ring.width() / 2, ring.width() / 2)
-        painter.setPen(QPen(BORDER, 1))
-        painter.setBrush(CREAM)
+        painter.setPen(QPen(self.colors["border"], 1))
+        painter.setBrush(self.colors["body"])
         inner = body.adjusted(0.5, 0.5, -0.5, -0.5)
         painter.drawRoundedRect(inner, inner.width() / 2, inner.width() / 2)
         painter.end()

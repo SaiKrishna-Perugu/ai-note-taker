@@ -10,7 +10,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from PySide6.QtCore import QEvent, QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QIcon,
+                           QPainter, QPixmap)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
 from ai_note_taker.ai import DEFAULT_MODEL
 from ai_note_taker.desktop_controller import DesktopController, list_devices
 from ai_note_taker.popup import CapsuleRecorder
+from ai_note_taker.theme import (PREFERENCE_LABELS, PREFERENCES, apply_color_scheme, normalize,
+                                 palette, resolve, style_sheet)
 
 ACTIVE = {"starting", "recording", "paused", "processing"}
 _fonts_loaded = False
@@ -59,7 +62,7 @@ def save_api_key(key: str) -> Path:
 
 
 def set_tone(widget: QWidget, tone: str) -> None:
-    """Switch a styled label between look variants (ok / warn / off) defined in STYLE."""
+    """Switch a styled label between look variants (ok / warn / off) defined in the theme stylesheet."""
     if widget.property("tone") != tone:
         widget.setProperty("tone", tone)
         widget.style().unpolish(widget)
@@ -77,57 +80,6 @@ def load_fonts() -> None:
         if path.exists():
             QFontDatabase.addApplicationFont(str(path))
     _fonts_loaded = True
-
-
-STYLE = """
-QWidget { color: #292724; font-family: 'Segoe UI'; font-size: 13px; }
-QMainWindow, #canvas, QMessageBox, QDialog { background: #faf9f6; }
-QMessageBox QLabel { color: #292724; }
-#sidebar { background: #eeede8; border-right: 1px solid #deddd7; }
-#settings { background: #f3f2ee; border: 1px solid #e4e2db; border-radius: 14px; }
-#card { background: white; border: 1px solid #e4e2db; border-radius: 14px; }
-#brand { font-size: 19px; font-weight: 700; letter-spacing: -0.5px; }
-#heading { font-size: 29px; font-weight: 650; letter-spacing: -0.7px; }
-#eyebrow { color: #817d75; font-size: 11px; font-weight: 650; }
-#muted { color: #817d75; }
-#status { color: #925137; background: #f5e5db; border-radius: 11px; padding: 5px 12px; font-weight: 600; }
-#time { font-size: 43px; font-weight: 600; letter-spacing: -1px; }
-#chip { border-radius: 11px; padding: 5px 12px; font-size: 11px; font-weight: 650; }
-#chip[tone="ok"] { color: #35602a; background: #e1eddb; }
-#chip[tone="warn"] { color: #925137; background: #f5e5db; }
-#chip[tone="off"] { color: #6f6b63; background: #ebeae4; }
-#settingsScroll, #settingsInner { background: transparent; }
-QScrollBar:vertical { background: transparent; width: 8px; margin: 4px 1px; }
-QScrollBar::handle:vertical { background: #cfcabd; border-radius: 3px; min-height: 28px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; background: transparent; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-#notice { background: #fbf0df; border: 1px solid #efd7b0; border-radius: 12px; }
-#noticeText { color: #6b4311; font-weight: 600; }
-QPushButton { background: #fff; border: 1px solid #dcd9d1; border-radius: 8px; padding: 9px 14px; font-weight: 600; }
-QPushButton:hover { background: #f1eee7; border-color: #c0baad; }
-QPushButton:pressed { background: #e7e1d6; }
-QPushButton:disabled { color: #aaa69f; background: #f2f0eb; border-color: #e5e2db; }
-QPushButton#primary { background: #be5b3d; border-color: #be5b3d; color: white; }
-QPushButton#primary:hover { background: #a84e34; }
-QPushButton#primary:disabled { background: #dbb5a7; border-color: #dbb5a7; }
-QLineEdit, QComboBox { background: white; border: 1px solid #dbd8d0; border-radius: 7px; padding: 8px; }
-QLineEdit:focus, QComboBox:focus { border: 1px solid #b66b4f; }
-QComboBox::drop-down { border: none; width: 22px; }
-QCheckBox { spacing: 7px; }
-QCheckBox::indicator { width: 16px; height: 16px; }
-QTextBrowser { background: white; border: none; padding: 12px; font-size: 14px; selection-background-color: #edcbb7; }
-QTabWidget::pane { border: none; background: white; }
-QTabBar::tab { background: transparent; color: #8a847a; padding: 13px 16px; border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { color: #a94e32; border-bottom: 2px solid #be5b3d; }
-QListWidget { border: none; background: transparent; outline: none; }
-QListWidget::item { padding: 12px 8px; border-radius: 7px; margin-bottom: 3px; }
-QListWidget::item:selected { background: #dfddd5; color: #292724; }
-QListWidget::item:hover { background: #e6e3db; }
-QMenu { background: #faf9f6; padding: 6px; border: 1px solid #dad6cd; }
-QMenu::item { padding: 8px 20px; border-radius: 4px; }
-QMenu::item:selected { background: #ece6dc; }
-QToolTip { background: #292724; color: #fff; border: none; padding: 5px; }
-"""
 
 
 def label(text: str, name: str = "", wrap: bool = False) -> QLabel:
@@ -185,8 +137,14 @@ class Waveform(QWidget):
         super().__init__()
         self.level = 0.0
         self.phase = 0
+        self.set_theme("light")
         self.setFixedHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_theme(self, theme: str) -> None:
+        colors = palette(theme)
+        self.idle_color, self.active_color = QColor(colors["wave_idle"]), QColor(colors["wave_active"])
+        self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -196,7 +154,7 @@ class Waveform(QWidget):
         for n in range(count):
             modulation = .25 + .75 * abs(math.sin(n * .82 + self.phase * .3))
             height = 4 + min(1, self.level * 3) * modulation * 48
-            painter.setBrush(QColor("#be5b3d" if self.level > .001 else "#e4dfd5"))
+            painter.setBrush(self.active_color if self.level > .001 else self.idle_color)
             painter.drawRoundedRect(n * 9, int((64-height)/2), 4, int(height), 2, 2)
         painter.end()
 
@@ -218,7 +176,10 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(icon())
         self.resize(1160, 730)
         self.setMinimumSize(960, 620)
-        self.setStyleSheet(STYLE)
+        self.theme_preference = normalize(self.preferences.value("theme", "system"))
+        apply_color_scheme(self.theme_preference)
+        self.theme_name = resolve(self.theme_preference)
+        self.setStyleSheet(style_sheet(self.theme_name))
         container = QWidget()
         container.setObjectName("canvas")
         self.setCentralWidget(container)
@@ -338,6 +299,17 @@ class MainWindow(QMainWindow):
         settings = QVBoxLayout(inner)
         settings.setContentsMargins(17, 20, 17, 18)
         settings.setSpacing(10)
+        settings.addWidget(label("APPEARANCE", "eyebrow"))
+        self.theme_box = QComboBox()
+        self.theme_box.setAccessibleName("Theme")
+        self.theme_box.setToolTip("Match Windows follows your Windows light/dark setting, even while the app is open.")
+        for preference in PREFERENCES:
+            self.theme_box.addItem(PREFERENCE_LABELS[preference], preference)
+        self.theme_box.setCurrentIndex(PREFERENCES.index(self.theme_preference))
+        self.theme_box.currentIndexChanged.connect(
+            lambda _index: self.set_theme_preference(self.theme_box.currentData()))
+        settings.addWidget(self.theme_box)
+        settings.addSpacing(8)
         settings.addWidget(label("CAPTURE SETTINGS", "eyebrow"))
         settings.addWidget(label("System audio"))
         self.system = QComboBox()
@@ -384,7 +356,7 @@ class MainWindow(QMainWindow):
 
         self.popup = CapsuleRecorder(self.record, self.toggle_pause, self.stop, self.dismiss_popup, self.preferences)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
-        menu = QMenu()
+        self.tray_menu = menu = QMenu()
         for title, action in (("Open Note Taker", self.restore), ("Show floating recorder", lambda: self.show_popup(force=True)),
                               ("Pause / Resume", self.toggle_pause), ("Stop recording", self.stop),
                               ("Quit", self.request_quit)):
@@ -397,6 +369,10 @@ class MainWindow(QMainWindow):
                                                  QSystemTrayIcon.ActivationReason.DoubleClick) else None)
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray.show()
+        hints = QGuiApplication.styleHints()
+        if hints is not None:
+            hints.colorSchemeChanged.connect(self.on_color_scheme_changed)   # Windows theme flipped
+        self.apply_theme()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(350)
@@ -423,6 +399,26 @@ class MainWindow(QMainWindow):
             if (parent / ".env").is_file():
                 return parent / ".env"
         return None
+
+    def set_theme_preference(self, preference: str) -> None:
+        self.theme_preference = normalize(preference)
+        self.preferences.setValue("theme", self.theme_preference)
+        apply_color_scheme(self.theme_preference)
+        self.apply_theme()
+
+    def on_color_scheme_changed(self, *_args) -> None:
+        if not self.quitting:
+            self.apply_theme()
+
+    def apply_theme(self) -> None:
+        """Restyle everything for the resolved light/dark theme."""
+        self.theme_name = resolve(self.theme_preference)
+        sheet = style_sheet(self.theme_name)
+        if sheet != self.styleSheet():
+            self.setStyleSheet(sheet)
+        self.tray_menu.setStyleSheet(sheet)
+        self.waveform.set_theme(self.theme_name)
+        self.popup.set_theme(self.theme_name)
 
     def ai_values(self) -> dict:
         # Blank lines (e.g. the template's empty GEMINI_API_KEY=) must not hide a real value.
